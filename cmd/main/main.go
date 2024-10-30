@@ -101,6 +101,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tableInput.Focus()
 			}
 
+		// Pressing `s` to set focus on the search box and activate edit mode
+		case "s":
+			m.focus = focusTableInput
+			m.tableInput.Focus()
+			return m, nil
+
 		// Handle `dd` sequence to clear search input
 		case "d":
 			if m.focus == focusTableInput && !m.tableInput.Focused() {
