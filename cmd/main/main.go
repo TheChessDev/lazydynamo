@@ -11,6 +11,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -52,10 +53,25 @@ func initialModel() model {
 	ti.CharLimit = 156
 	ti.Width = 20
 
+	// Load AWS config with custom retry settings
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion("us-east-1"),
+		config.WithRetryer(func() aws.Retryer {
+			return retry.AddWithMaxAttempts(retry.NewStandard(), 5) // 5 retry attempts
+		}),
+	)
+	if err != nil {
+		log.Fatalf("unable to load SDK config, %v", err)
+	}
+
+	// Create a persistent DynamoDB client
+	client := dynamodb.NewFromConfig(cfg)
+
 	return model{
 		focus:      focusTableInput,
 		region:     "us-east-1",
 		tableInput: ti,
+		client:     client, // Use persistent client
 		loading:    true,
 	}
 }
@@ -99,12 +115,15 @@ type fetchErrorMsg struct {
 // Command to fetch data from a selected DynamoDB table
 func (m model) fetchTableData(tableName string) tea.Cmd {
 	return func() tea.Msg {
-		output, err := m.client.Scan(context.Background(), &dynamodb.ScanInput{
+		// Use a context with timeout to prevent premature termination
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		output, err := m.client.Scan(ctx, &dynamodb.ScanInput{
 			TableName: &tableName,
 			Limit:     aws.Int32(100), // Limit to 100 items to prevent excessive loading
 		})
 		if err != nil {
-			// Return an error message to be handled in the Update function
 			return fetchErrorMsg{err}
 		}
 
