@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -321,7 +322,7 @@ func (m model) View() string {
 
 	leftColumn := lipgloss.JoinVertical(lipgloss.Top, regionContent, tableListContent, inputContent)
 
-	// Right box: Data view
+	// Right box: Data view in compact single-line JSON format
 	rightWidth := containerWidth - leftWidth - 4
 	rightBoxStyle := lipgloss.NewStyle().
 		Width(rightWidth).
@@ -331,14 +332,29 @@ func (m model) View() string {
 	if m.focus == focusDataBox {
 		rightBoxStyle = rightBoxStyle.BorderForeground(lipgloss.Color("10"))
 	}
-	// Render data content with scrolling
+	// Render data content as compact JSON with scrolling and truncation
 	visibleData := m.tableData[m.dataScrollOffset:]
 	if len(visibleData) > visibleCount {
 		visibleData = visibleData[:visibleCount]
 	}
 	dataContent := ""
 	for i, item := range visibleData {
-		row := fmt.Sprintf("%v", item)
+		// Convert DynamoDB item to JSON
+		goMap, err := dynamoItemToMap(item)
+		if err != nil {
+			dataContent += fmt.Sprintf("Error: %v\n", err)
+			continue
+		}
+		// Compact JSON format without indentation
+		jsonData, _ := json.Marshal(goMap)
+		row := string(jsonData)
+
+		// Truncate row if it exceeds the box width and add ellipsis
+		maxWidth := rightWidth - 4 // Adjust for padding/border
+		if len(row) > maxWidth {
+			row = row[:maxWidth-3] + "..." // Truncate and add "..."
+		}
+
 		if i+m.dataScrollOffset == m.selectedDataIndex {
 			dataContent += lipgloss.NewStyle().
 				Foreground(lipgloss.Color("10")).
@@ -381,6 +397,57 @@ func filterTables(tables []string, filterText string) []string {
 	}
 
 	return filtered
+}
+
+// Convert DynamoDB item to a regular Go map for JSON encoding
+func dynamoItemToMap(item map[string]types.AttributeValue) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+	for key, value := range item {
+		var err error
+		result[key], err = attributeValueToInterface(value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+// Recursively convert DynamoDB AttributeValue to an interface for JSON marshalling
+func attributeValueToInterface(av types.AttributeValue) (interface{}, error) {
+	switch v := av.(type) {
+	case *types.AttributeValueMemberS:
+		return v.Value, nil
+	case *types.AttributeValueMemberN:
+		return v.Value, nil
+	case *types.AttributeValueMemberBOOL:
+		return v.Value, nil
+	case *types.AttributeValueMemberSS:
+		return v.Value, nil
+	case *types.AttributeValueMemberNS:
+		return v.Value, nil
+	case *types.AttributeValueMemberL:
+		list := make([]interface{}, len(v.Value))
+		for i, item := range v.Value {
+			val, err := attributeValueToInterface(item)
+			if err != nil {
+				return nil, err
+			}
+			list[i] = val
+		}
+		return list, nil
+	case *types.AttributeValueMemberM:
+		m := make(map[string]interface{})
+		for key, item := range v.Value {
+			val, err := attributeValueToInterface(item)
+			if err != nil {
+				return nil, err
+			}
+			m[key] = val
+		}
+		return m, nil
+	default:
+		return nil, fmt.Errorf("unsupported AttributeValue type %T", v)
+	}
 }
 
 func main() {
