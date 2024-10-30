@@ -199,23 +199,29 @@ func (m model) View() string {
 	regionContent := regionBoxStyle.Render(fmt.Sprintf("AWS Region: %s", m.region))
 
 	// Table list box with scrolling and highlighting for selected item
+	tableListHeight := containerHeight - 11 // Adjusted for padding and other components
+	visibleCount := tableListHeight / 1     // Assuming each row takes 1 line; adjust if needed
+
 	tableListStyle := lipgloss.NewStyle().
 		Width(leftWidth).
-		Height(containerHeight-11).
+		Height(tableListHeight).
 		Padding(1, 1).
 		Border(lipgloss.RoundedBorder())
 	if m.focus == focusTableList {
 		tableListStyle = tableListStyle.BorderForeground(lipgloss.Color("10"))
 	}
+
 	tableListContent := ""
 	if m.loading {
 		tableListContent = tableListStyle.Render("Loading tables...")
 	} else {
-		// Display visible tables within scroll range
+		// Determine the maximum items we can display safely
 		visibleItems := m.filtered[m.scrollOffset:]
-		if len(visibleItems) > 5 { // Limit visible rows to 5
-			visibleItems = visibleItems[:20]
+		if len(visibleItems) > visibleCount {
+			visibleItems = visibleItems[:visibleCount]
 		}
+
+		// Render the items
 		for i, table := range visibleItems {
 			if i+m.scrollOffset == m.selectedIndex {
 				tableListContent += lipgloss.NewStyle().
