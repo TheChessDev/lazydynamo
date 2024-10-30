@@ -104,6 +104,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle `Enter` key to switch to tables box when in edit mode
+		if msg.String() == "enter" && m.tableInput.Focused() {
+			m.tableInput.Blur()
+			m.focus = focusTableList
+			return m, nil
+		}
+
 		// If the text input is focused, process only text input updates and ignore Vim motions
 		if m.tableInput.Focused() {
 			var cmd tea.Cmd
@@ -119,27 +126,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-
-		case "k":
-			if m.focus == focusTableInput {
-				m.focus = focusTableList
-				m.tableInput.Blur()
-			}
-		case "j":
-			if m.focus == focusTableList {
-				m.focus = focusTableInput
-				m.tableInput.Focus()
-			}
-		case "l":
-			if m.focus == focusTableInput || m.focus == focusTableList {
-				m.focus = focusRight
-				m.tableInput.Blur()
-			}
-		case "h":
-			if m.focus == focusRight {
-				m.focus = focusTableInput
-				m.tableInput.Focus()
-			}
 
 		// Pressing `s` to set focus on the search box and activate edit mode
 		case "s":
