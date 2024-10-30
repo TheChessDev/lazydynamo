@@ -36,6 +36,7 @@ type model struct {
 	ddBuffer          string
 	filtered          []string
 	focus             focus
+	lastEvaluatedKey  map[string]types.AttributeValue
 	lastKeyTime       time.Time
 	loading           bool
 	region            string
@@ -114,27 +115,37 @@ type fetchErrorMsg struct {
 }
 
 // Command to fetch data from a selected DynamoDB table
-func (m model) fetchTableData(tableName string) tea.Cmd {
+// Command to fetch data from a selected DynamoDB table, with pagination support
+func (m model) fetchTableData(tableName string, startKey map[string]types.AttributeValue) tea.Cmd {
 	return func() tea.Msg {
 		// Use a context with timeout to prevent premature termination
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		output, err := m.client.Scan(ctx, &dynamodb.ScanInput{
-			TableName: &tableName,
-			Limit:     aws.Int32(100), // Limit to 100 items to prevent excessive loading
-		})
+		input := &dynamodb.ScanInput{
+			TableName:         &tableName,
+			Limit:             aws.Int32(100), // Fetch 100 items at a time
+			ExclusiveStartKey: startKey,       // Start key for pagination
+		}
+
+		output, err := m.client.Scan(ctx, input)
 		if err != nil {
 			return fetchErrorMsg{err}
 		}
 
-		// Return the fetched items as a tableDataFetchedMsg
-		return tableDataFetchedMsg(output.Items)
+		// Return the fetched items and the new LastEvaluatedKey
+		return tableDataFetchedMsg{
+			Items:            output.Items,
+			LastEvaluatedKey: output.LastEvaluatedKey,
+		}
 	}
 }
 
 type tablesFetchedMsg []string
-type tableDataFetchedMsg []map[string]types.AttributeValue
+type tableDataFetchedMsg struct {
+	Items            []map[string]types.AttributeValue
+	LastEvaluatedKey map[string]types.AttributeValue
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -150,9 +161,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tableDataFetchedMsg:
-		m.tableData = msg
+		// Append fetched data and update pagination key
+		m.tableData = append(m.tableData, msg.Items...)
+		m.lastEvaluatedKey = msg.LastEvaluatedKey
 		m.selectedDataIndex = 0
 		m.dataScrollOffset = 0
+		m.focus = focusDataBox // Switch focus to data box
 		return m, nil
 
 	case tea.KeyMsg:
@@ -184,7 +198,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "j":
 				if m.selectedIndex < len(m.filtered)-1 {
 					m.selectedIndex++
-					if m.selectedIndex >= m.scrollOffset+5 { // Adjust `5` to match visible rows
+					if m.selectedIndex >= m.scrollOffset+5 { // Adjust for visible rows
 						m.scrollOffset++
 					}
 				}
@@ -196,10 +210,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case "l":
-				// Fetch data for selected table
+				// Fetch data for the selected table and switch focus on successful load
 				selectedTable := m.filtered[m.selectedIndex]
-				m.focus = focusDataBox
-				return m, m.fetchTableData(selectedTable)
+				return m, m.fetchTableData(selectedTable, nil)
 			}
 		}
 
@@ -212,6 +225,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.selectedDataIndex >= m.dataScrollOffset+5 { // Adjust for visible rows
 						m.dataScrollOffset++
 					}
+				} else if m.lastEvaluatedKey != nil {
+					// If we're at the bottom and there's more data to load, fetch the next batch
+					selectedTable := m.filtered[m.selectedIndex]
+					return m, m.fetchTableData(selectedTable, m.lastEvaluatedKey)
 				}
 			case "k":
 				if m.selectedDataIndex > 0 {
