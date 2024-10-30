@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"golang.org/x/term"
+	"log"
 	"os"
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -29,6 +34,7 @@ type model struct {
 	filtered    []string
 	ddBuffer    string
 	lastKeyTime time.Time
+	client      *dynamodb.Client
 }
 
 func initialModel() model {
@@ -38,20 +44,45 @@ func initialModel() model {
 	ti.CharLimit = 156
 	ti.Width = 20
 
-	// Simulate table names for now
-	tables := []string{"Users", "Orders", "Products", "Sessions", "Logs", "Customers", "Inventory"}
-
 	return model{
 		focus:      focusTableInput,
 		region:     "us-east-1",
 		tableInput: ti,
-		tables:     tables,
-		filtered:   tables,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return textinput.Blink
+	// Load AWS configuration
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(m.region))
+	if err != nil {
+		log.Fatalf("unable to load SDK config, %v", err)
+	}
+
+	// Create DynamoDB client
+	m.client = dynamodb.NewFromConfig(cfg)
+
+	// Fetch tables from DynamoDB
+	return m.fetchTables
+}
+
+// Command to fetch tables from DynamoDB
+func (m model) fetchTables() tea.Msg {
+	// List all tables
+	var tableNames []string
+	input := &dynamodb.ListTablesInput{}
+	paginator := dynamodb.NewListTablesPaginator(m.client, input)
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.TODO())
+		if err != nil {
+			log.Fatalf("failed to fetch tables, %v", err)
+		}
+		tableNames = append(tableNames, page.TableNames...)
+	}
+
+	m.tables = tableNames
+	m.filtered = tableNames // Initialize filtered with all tables
+	return nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
