@@ -27,15 +27,17 @@ const (
 )
 
 type model struct {
-	client      *dynamodb.Client
-	ddBuffer    string
-	filtered    []string
-	focus       focus
-	lastKeyTime time.Time
-	loading     bool
-	region      string
-	tableInput  textinput.Model
-	tables      []string
+	client        *dynamodb.Client
+	ddBuffer      string
+	filtered      []string
+	focus         focus
+	lastKeyTime   time.Time
+	loading       bool
+	region        string
+	scrollOffset  int
+	selectedIndex int
+	tableInput    textinput.Model
+	tables        []string
 }
 
 func initialModel() model {
@@ -90,72 +92,87 @@ type tablesFetchedMsg []string
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tablesFetchedMsg:
-		// Update model with the fetched tables and disable loading
 		m.tables = msg
 		m.filtered = msg
 		m.loading = false
 		return m, nil
 
 	case tea.KeyMsg:
-		// Handle `Escape` key globally to exit edit mode when in the search box
 		if msg.String() == "esc" && m.tableInput.Focused() {
 			m.tableInput.Blur()
-			m.ddBuffer = "" // Clear dd buffer on exiting edit mode
+			m.ddBuffer = ""
 			return m, nil
 		}
 
-		// Handle `Enter` key to switch to tables box when in edit mode
-		if msg.String() == "enter" && m.tableInput.Focused() {
+		if msg.String() == "enter" && m.tableInput.Focused() && !m.loading {
 			m.tableInput.Blur()
 			m.focus = focusTableList
 			return m, nil
 		}
 
-		// If the text input is focused, process only text input updates and ignore Vim motions
 		if m.tableInput.Focused() {
 			var cmd tea.Cmd
 			m.tableInput, cmd = m.tableInput.Update(msg)
-
-			// Filter table names based on text input
 			filterText := m.tableInput.Value()
 			m.filtered = filterTables(m.tables, filterText)
+			m.selectedIndex = 0 // Reset selection when filtering
+			m.scrollOffset = 0  // Reset scroll
 			return m, cmd
 		}
 
-		// Vim-like key motions (only when not in edit mode)
+		// Scrollable tables box navigation when focused
+		if m.focus == focusTableList {
+			switch msg.String() {
+			case "j":
+				if m.selectedIndex < len(m.filtered)-1 {
+					m.selectedIndex++
+					if m.selectedIndex >= m.scrollOffset+5 { // Adjust `5` to match visible rows
+						m.scrollOffset++
+					}
+				}
+			case "k":
+				if m.selectedIndex > 0 {
+					m.selectedIndex--
+					if m.selectedIndex < m.scrollOffset {
+						m.scrollOffset--
+					}
+				}
+			case "l":
+				// Action when an item is selected (e.g., go to a details view)
+				m.focus = focusRight
+				return m, nil
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 
-		// Pressing `s` to set focus on the search box and activate edit mode
 		case "s":
 			m.focus = focusTableInput
 			m.tableInput.Focus()
 			return m, nil
 
-		// Handle `dd` sequence to clear search input
 		case "d":
 			if m.focus == focusTableInput && !m.tableInput.Focused() {
 				now := time.Now()
 				if m.ddBuffer == "d" && now.Sub(m.lastKeyTime) < 500*time.Millisecond {
-					m.tableInput.SetValue("") // Clear the input
+					m.tableInput.SetValue("")
 					m.filtered = filterTables(m.tables, "")
-					m.ddBuffer = "" // Reset buffer after clearing
+					m.ddBuffer = ""
 				} else {
 					m.ddBuffer = "d"
 					m.lastKeyTime = now
 				}
 			}
 
-		// Pressing `i` to focus the input box if it's not already in edit mode
 		case "i":
 			if m.focus == focusTableInput && !m.tableInput.Focused() {
 				m.tableInput.Focus()
-				return m, nil // Prevent "i" from being typed into the input
+				return m, nil
 			}
 
 		default:
-			// Reset buffer if any key other than "d" is pressed
 			m.ddBuffer = ""
 		}
 	}
@@ -172,11 +189,8 @@ func (m model) View() string {
 
 	containerWidth := width - 10
 	containerHeight := height - 5
-
-	// Define left panel width
 	leftWidth := int(0.3*float64(containerWidth)) - 2
 
-	// Region display box at the top of the left column
 	regionBoxStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(3).
@@ -184,7 +198,7 @@ func (m model) View() string {
 		Padding(0, 1)
 	regionContent := regionBoxStyle.Render(fmt.Sprintf("AWS Region: %s", m.region))
 
-	// Table list box or loading message
+	// Table list box with scrolling and highlighting for selected item
 	tableListStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(containerHeight-11).
@@ -193,14 +207,27 @@ func (m model) View() string {
 	if m.focus == focusTableList {
 		tableListStyle = tableListStyle.BorderForeground(lipgloss.Color("10"))
 	}
-	var tableListContent string
+	tableListContent := ""
 	if m.loading {
 		tableListContent = tableListStyle.Render("Loading tables...")
 	} else {
-		tableListContent = tableListStyle.Render(strings.Join(m.filtered, "\n"))
+		// Display visible tables within scroll range
+		visibleItems := m.filtered[m.scrollOffset:]
+		if len(visibleItems) > 5 { // Limit visible rows to 5
+			visibleItems = visibleItems[:20]
+		}
+		for i, table := range visibleItems {
+			if i+m.scrollOffset == m.selectedIndex {
+				tableListContent += lipgloss.NewStyle().
+					Foreground(lipgloss.Color("10")). // Highlight selected item
+					Render("> "+table) + "\n"
+			} else {
+				tableListContent += "  " + table + "\n"
+			}
+		}
+		tableListContent = tableListStyle.Render(tableListContent)
 	}
 
-	// Text input box at the bottom of the left column, with focus color
 	leftBottomBoxStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(3).
@@ -211,10 +238,8 @@ func (m model) View() string {
 	}
 	inputContent := leftBottomBoxStyle.Render(m.tableInput.View())
 
-	// Combine region, table list, and input box vertically in the left column
 	leftColumn := lipgloss.JoinVertical(lipgloss.Top, regionContent, tableListContent, inputContent)
 
-	// Define placeholder right box, with focus color
 	rightWidth := containerWidth - leftWidth - 4
 	rightBoxStyle := lipgloss.NewStyle().
 		Width(rightWidth).
@@ -226,24 +251,36 @@ func (m model) View() string {
 	}
 	rightBoxContent := rightBoxStyle.Render("")
 
-	// Main container style
 	containerStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Width(containerWidth).
 		Height(containerHeight)
 
-	// Arrange layout
 	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightBoxContent)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, containerStyle.Render(mainContent))
 }
 
 func filterTables(tables []string, filterText string) []string {
+	filterText = strings.ToLower(filterText)
 	var filtered []string
+
 	for _, table := range tables {
-		if strings.Contains(strings.ToLower(table), strings.ToLower(filterText)) {
+		tableLower := strings.ToLower(table)
+		matchIndex := 0
+
+		// Fuzzy match: check if all characters of filterText appear in tableLower in order
+		for i := 0; i < len(tableLower) && matchIndex < len(filterText); i++ {
+			if tableLower[i] == filterText[matchIndex] {
+				matchIndex++
+			}
+		}
+
+		// If we matched all characters in filterText, add table to the results
+		if matchIndex == len(filterText) {
 			filtered = append(filtered, table)
 		}
 	}
+
 	return filtered
 }
 
