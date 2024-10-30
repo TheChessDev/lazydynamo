@@ -10,8 +10,10 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,17 +29,20 @@ const (
 )
 
 type model struct {
-	client        *dynamodb.Client
-	ddBuffer      string
-	filtered      []string
-	focus         focus
-	lastKeyTime   time.Time
-	loading       bool
-	region        string
-	scrollOffset  int
-	selectedIndex int
-	tableInput    textinput.Model
-	tables        []string
+	client            *dynamodb.Client
+	dataScrollOffset  int
+	ddBuffer          string
+	filtered          []string
+	focus             focus
+	lastKeyTime       time.Time
+	loading           bool
+	region            string
+	scrollOffset      int
+	selectedDataIndex int
+	selectedIndex     int
+	tableData         []map[string]types.AttributeValue // To store fetched data
+	tableInput        textinput.Model
+	tables            []string
 }
 
 func initialModel() model {
@@ -86,15 +91,48 @@ func (m model) fetchTables() tea.Msg {
 	return tablesFetchedMsg(tableNames)
 }
 
-// Message type for fetched tables
+// Error message type for fetching table data
+type fetchErrorMsg struct {
+	error
+}
+
+// Command to fetch data from a selected DynamoDB table
+func (m model) fetchTableData(tableName string) tea.Cmd {
+	return func() tea.Msg {
+		output, err := m.client.Scan(context.Background(), &dynamodb.ScanInput{
+			TableName: &tableName,
+			Limit:     aws.Int32(100), // Limit to 100 items to prevent excessive loading
+		})
+		if err != nil {
+			// Return an error message to be handled in the Update function
+			return fetchErrorMsg{err}
+		}
+
+		// Return the fetched items as a tableDataFetchedMsg
+		return tableDataFetchedMsg(output.Items)
+	}
+}
+
 type tablesFetchedMsg []string
+type tableDataFetchedMsg []map[string]types.AttributeValue
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case fetchErrorMsg:
+		// Handle the error message
+		fmt.Printf("Error fetching data: %v\n", msg.error)
+		return m, nil
+
 	case tablesFetchedMsg:
 		m.tables = msg
 		m.filtered = msg
 		m.loading = false
+		return m, nil
+
+	case tableDataFetchedMsg:
+		m.tableData = msg
+		m.selectedDataIndex = 0
+		m.dataScrollOffset = 0
 		return m, nil
 
 	case tea.KeyMsg:
@@ -138,9 +176,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case "l":
-				// Action when an item is selected (e.g., go to a details view)
-				m.focus = focusRight
-				return m, nil
+				// Fetch data for selected table
+				selectedTable := m.filtered[m.selectedIndex]
+				return m, m.fetchTableData(selectedTable)
+			}
+		}
+
+		// Scrollable data box navigation when focused
+		if m.focus == focusRight {
+			switch msg.String() {
+			case "j":
+				if m.selectedDataIndex < len(m.tableData)-1 {
+					m.selectedDataIndex++
+					if m.selectedDataIndex >= m.dataScrollOffset+5 { // Adjust for visible rows
+						m.dataScrollOffset++
+					}
+				}
+			case "k":
+				if m.selectedDataIndex > 0 {
+					m.selectedDataIndex--
+					if m.selectedDataIndex < m.dataScrollOffset {
+						m.dataScrollOffset--
+					}
+				}
+			case " ":
+				// Handle space for selecting items (or toggling selection, if implemented)
+				fmt.Printf("Selected item: %v\n", m.tableData[m.selectedDataIndex])
 			}
 		}
 
@@ -198,9 +259,9 @@ func (m model) View() string {
 		Padding(0, 1)
 	regionContent := regionBoxStyle.Render(fmt.Sprintf("AWS Region: %s", m.region))
 
-	// Table list box with scrolling and highlighting for selected item
-	tableListHeight := containerHeight - 11 // Adjusted for padding and other components
-	visibleCount := tableListHeight / 1     // Assuming each row takes 1 line; adjust if needed
+	// Table list box
+	tableListHeight := containerHeight - 11
+	visibleCount := tableListHeight / 1
 
 	tableListStyle := lipgloss.NewStyle().
 		Width(leftWidth).
@@ -210,30 +271,24 @@ func (m model) View() string {
 	if m.focus == focusTableList {
 		tableListStyle = tableListStyle.BorderForeground(lipgloss.Color("10"))
 	}
-
-	tableListContent := ""
-	if m.loading {
-		tableListContent = tableListStyle.Render("Loading tables...")
-	} else {
-		// Determine the maximum items we can display safely
-		visibleItems := m.filtered[m.scrollOffset:]
-		if len(visibleItems) > visibleCount {
-			visibleItems = visibleItems[:visibleCount]
-		}
-
-		// Render the items
-		for i, table := range visibleItems {
-			if i+m.scrollOffset == m.selectedIndex {
-				tableListContent += lipgloss.NewStyle().
-					Foreground(lipgloss.Color("10")). // Highlight selected item
-					Render("> "+table) + "\n"
-			} else {
-				tableListContent += "  " + table + "\n"
-			}
-		}
-		tableListContent = tableListStyle.Render(tableListContent)
+	// Render table list content with scrolling
+	visibleItems := m.filtered[m.scrollOffset:]
+	if len(visibleItems) > visibleCount {
+		visibleItems = visibleItems[:visibleCount]
 	}
+	tableListContent := ""
+	for i, table := range visibleItems {
+		if i+m.scrollOffset == m.selectedIndex {
+			tableListContent += lipgloss.NewStyle().
+				Foreground(lipgloss.Color("10")).
+				Render("> "+table) + "\n"
+		} else {
+			tableListContent += "  " + table + "\n"
+		}
+	}
+	tableListContent = tableListStyle.Render(tableListContent)
 
+	// Text input box
 	leftBottomBoxStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(3).
@@ -246,6 +301,7 @@ func (m model) View() string {
 
 	leftColumn := lipgloss.JoinVertical(lipgloss.Top, regionContent, tableListContent, inputContent)
 
+	// Right box: Data view
 	rightWidth := containerWidth - leftWidth - 4
 	rightBoxStyle := lipgloss.NewStyle().
 		Width(rightWidth).
@@ -255,8 +311,25 @@ func (m model) View() string {
 	if m.focus == focusRight {
 		rightBoxStyle = rightBoxStyle.BorderForeground(lipgloss.Color("10"))
 	}
-	rightBoxContent := rightBoxStyle.Render("")
+	// Render data content with scrolling
+	visibleData := m.tableData[m.dataScrollOffset:]
+	if len(visibleData) > visibleCount {
+		visibleData = visibleData[:visibleCount]
+	}
+	dataContent := ""
+	for i, item := range visibleData {
+		row := fmt.Sprintf("%v", item)
+		if i+m.dataScrollOffset == m.selectedDataIndex {
+			dataContent += lipgloss.NewStyle().
+				Foreground(lipgloss.Color("10")).
+				Render("> "+row) + "\n"
+		} else {
+			dataContent += "  " + row + "\n"
+		}
+	}
+	rightBoxContent := rightBoxStyle.Render(dataContent)
 
+	// Main container
 	containerStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Width(containerWidth).
