@@ -27,14 +27,15 @@ const (
 )
 
 type model struct {
+	client      *dynamodb.Client
+	ddBuffer    string
+	filtered    []string
 	focus       focus
+	lastKeyTime time.Time
+	loading     bool
 	region      string
 	tableInput  textinput.Model
 	tables      []string
-	filtered    []string
-	ddBuffer    string
-	lastKeyTime time.Time
-	client      *dynamodb.Client
 }
 
 func initialModel() model {
@@ -48,6 +49,7 @@ func initialModel() model {
 		focus:      focusTableInput,
 		region:     "us-east-1",
 		tableInput: ti,
+		loading:    true,
 	}
 }
 
@@ -67,7 +69,6 @@ func (m model) Init() tea.Cmd {
 
 // Command to fetch tables from DynamoDB
 func (m model) fetchTables() tea.Msg {
-	// List all tables
 	var tableNames []string
 	input := &dynamodb.ListTablesInput{}
 	paginator := dynamodb.NewListTablesPaginator(m.client, input)
@@ -80,13 +81,21 @@ func (m model) fetchTables() tea.Msg {
 		tableNames = append(tableNames, page.TableNames...)
 	}
 
-	m.tables = tableNames
-	m.filtered = tableNames // Initialize filtered with all tables
-	return nil
+	return tablesFetchedMsg(tableNames)
 }
+
+// Message type for fetched tables
+type tablesFetchedMsg []string
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tablesFetchedMsg:
+		// Update model with the fetched tables and disable loading
+		m.tables = msg
+		m.filtered = msg
+		m.loading = false
+		return m, nil
+
 	case tea.KeyMsg:
 		// Handle `Escape` key globally to exit edit mode when in the search box
 		if msg.String() == "esc" && m.tableInput.Focused() {
@@ -186,20 +195,24 @@ func (m model) View() string {
 		Width(leftWidth).
 		Height(3).
 		Border(lipgloss.RoundedBorder()).
-		Align(lipgloss.Center).
-		Padding(1, 1)
+		Padding(0, 1)
 	regionContent := regionBoxStyle.Render(fmt.Sprintf("AWS Region: %s", m.region))
 
-	// Table list box in the middle of the left column, with focus color
+	// Table list box or loading message
 	tableListStyle := lipgloss.NewStyle().
 		Width(leftWidth).
-		Height(containerHeight-11). // Adjust height to fit input box below
+		Height(containerHeight-11).
 		Padding(1, 1).
 		Border(lipgloss.RoundedBorder())
 	if m.focus == focusTableList {
-		tableListStyle = tableListStyle.BorderForeground(lipgloss.Color("10")) // Green color
+		tableListStyle = tableListStyle.BorderForeground(lipgloss.Color("10"))
 	}
-	tableListContent := tableListStyle.Render(strings.Join(m.filtered, "\n"))
+	var tableListContent string
+	if m.loading {
+		tableListContent = tableListStyle.Render("Loading tables...")
+	} else {
+		tableListContent = tableListStyle.Render(strings.Join(m.filtered, "\n"))
+	}
 
 	// Text input box at the bottom of the left column, with focus color
 	leftBottomBoxStyle := lipgloss.NewStyle().
@@ -208,7 +221,7 @@ func (m model) View() string {
 		Padding(0, 1).
 		Border(lipgloss.RoundedBorder())
 	if m.focus == focusTableInput {
-		leftBottomBoxStyle = leftBottomBoxStyle.BorderForeground(lipgloss.Color("10")) // Green color
+		leftBottomBoxStyle = leftBottomBoxStyle.BorderForeground(lipgloss.Color("10"))
 	}
 	inputContent := leftBottomBoxStyle.Render(m.tableInput.View())
 
@@ -223,7 +236,7 @@ func (m model) View() string {
 		Border(lipgloss.RoundedBorder()).
 		Padding(1, 1)
 	if m.focus == focusRight {
-		rightBoxStyle = rightBoxStyle.BorderForeground(lipgloss.Color("10")) // Green color
+		rightBoxStyle = rightBoxStyle.BorderForeground(lipgloss.Color("10"))
 	}
 	rightBoxContent := rightBoxStyle.Render("")
 
