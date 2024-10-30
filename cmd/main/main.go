@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -36,8 +37,6 @@ type model struct {
 	ddBuffer          string
 	filtered          []string
 	focus             focus
-	lastEvaluatedKey  map[string]types.AttributeValue
-	lastKeyTime       time.Time
 	loading           bool
 	region            string
 	scrollOffset      int
@@ -56,101 +55,100 @@ func initialModel() model {
 	ti.Width = 20
 
 	// Load AWS config with custom retry settings
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion("us-east-1"),
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"),
 		config.WithRetryer(func() aws.Retryer {
-			return retry.AddWithMaxAttempts(retry.NewStandard(), 5) // 5 retry attempts
+			return retry.AddWithMaxAttempts(retry.NewStandard(), 5)
 		}),
 	)
+
 	if err != nil {
 		log.Fatalf("unable to load SDK config, %v", err)
 	}
 
-	// Create a persistent DynamoDB client
 	client := dynamodb.NewFromConfig(cfg)
 
 	return model{
 		focus:      focusTableInput,
 		region:     "us-east-1",
 		tableInput: ti,
-		client:     client, // Use persistent client
+		client:     client,
 		loading:    true,
 	}
 }
 
-func (m model) Init() tea.Cmd {
-	// Load AWS configuration
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(m.region))
-	if err != nil {
-		log.Fatalf("unable to load SDK config, %v", err)
-	}
-
-	// Create DynamoDB client
-	m.client = dynamodb.NewFromConfig(cfg)
-
-	// Fetch tables from DynamoDB
-	return m.fetchTables
-}
-
-// Command to fetch tables from DynamoDB
-func (m model) fetchTables() tea.Msg {
-	var tableNames []string
-	input := &dynamodb.ListTablesInput{}
-	paginator := dynamodb.NewListTablesPaginator(m.client, input)
-
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(context.TODO())
-		if err != nil {
-			log.Fatalf("failed to fetch tables, %v", err)
-		}
-		tableNames = append(tableNames, page.TableNames...)
-	}
-
-	return tablesFetchedMsg(tableNames)
-}
-
-// Error message type for fetching table data
-type fetchErrorMsg struct {
-	error
-}
-
-// Command to fetch data from a selected DynamoDB table
-// Command to fetch data from a selected DynamoDB table, with pagination support
-func (m model) fetchTableData(tableName string, startKey map[string]types.AttributeValue) tea.Cmd {
+// Command to fetch all data concurrently from a DynamoDB table
+func (m model) fetchAllData(tableName string) tea.Cmd {
 	return func() tea.Msg {
-		// Use a context with timeout to prevent premature termination
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		input := &dynamodb.ScanInput{
-			TableName:         &tableName,
-			Limit:             aws.Int32(100), // Fetch 100 items at a time
-			ExclusiveStartKey: startKey,       // Start key for pagination
+		var allItems []map[string]types.AttributeValue
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		lastEvaluatedKeys := []map[string]types.AttributeValue{nil} // Start with initial key
+
+		for _, startKey := range lastEvaluatedKeys {
+			wg.Add(1)
+			go func(startKey map[string]types.AttributeValue) {
+				defer wg.Done()
+				for {
+					input := &dynamodb.ScanInput{
+						TableName:         &tableName,
+						Limit:             aws.Int32(100),
+						ExclusiveStartKey: startKey,
+					}
+					output, err := m.client.Scan(ctx, input)
+					if err != nil {
+						log.Printf("Failed to fetch data from DynamoDB: %v", err)
+						return
+					}
+
+					mu.Lock()
+					allItems = append(allItems, output.Items...)
+					mu.Unlock()
+
+					if output.LastEvaluatedKey == nil {
+						break
+					}
+					startKey = output.LastEvaluatedKey
+				}
+			}(startKey)
 		}
 
-		output, err := m.client.Scan(ctx, input)
-		if err != nil {
-			return fetchErrorMsg{err}
-		}
-
-		// Return the fetched items and the new LastEvaluatedKey
-		return tableDataFetchedMsg{
-			Items:            output.Items,
-			LastEvaluatedKey: output.LastEvaluatedKey,
-		}
+		wg.Wait()
+		return dataFetchedMsg(allItems) // Send message with all fetched data
 	}
 }
 
 type tablesFetchedMsg []string
-type tableDataFetchedMsg struct {
-	Items            []map[string]types.AttributeValue
-	LastEvaluatedKey map[string]types.AttributeValue
+type dataFetchedMsg []map[string]types.AttributeValue
+type fetchErrorMsg struct{ error }
+
+func (m model) Init() tea.Cmd {
+	return m.fetchTables()
+}
+
+// Command to fetch tables from DynamoDB
+func (m model) fetchTables() tea.Cmd {
+	return func() tea.Msg {
+		var tableNames []string
+		input := &dynamodb.ListTablesInput{}
+		paginator := dynamodb.NewListTablesPaginator(m.client, input)
+
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(context.TODO())
+			if err != nil {
+				return fetchErrorMsg{err}
+			}
+			tableNames = append(tableNames, page.TableNames...)
+		}
+		return tablesFetchedMsg(tableNames)
+	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case fetchErrorMsg:
-		// Handle the error message
 		fmt.Printf("Error fetching data: %v\n", msg.error)
 		return m, nil
 
@@ -160,13 +158,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		return m, nil
 
-	case tableDataFetchedMsg:
-		// Append fetched data and update pagination key
-		m.tableData = append(m.tableData, msg.Items...)
-		m.lastEvaluatedKey = msg.LastEvaluatedKey
+	case dataFetchedMsg:
+		m.tableData = msg
 		m.selectedDataIndex = 0
 		m.dataScrollOffset = 0
-		m.focus = focusDataBox // Switch focus to data box
+		m.loading = false
+		m.focus = focusDataBox
 		return m, nil
 
 	case tea.KeyMsg:
@@ -187,18 +184,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tableInput, cmd = m.tableInput.Update(msg)
 			filterText := m.tableInput.Value()
 			m.filtered = filterTables(m.tables, filterText)
-			m.selectedIndex = 0 // Reset selection when filtering
-			m.scrollOffset = 0  // Reset scroll
+			m.selectedIndex = 0
+			m.scrollOffset = 0
 			return m, cmd
 		}
 
-		// Scrollable tables box navigation when focused
 		if m.focus == focusTableList {
 			switch msg.String() {
 			case "j":
 				if m.selectedIndex < len(m.filtered)-1 {
 					m.selectedIndex++
-					if m.selectedIndex >= m.scrollOffset+5 { // Adjust for visible rows
+					if m.selectedIndex >= m.scrollOffset+5 {
 						m.scrollOffset++
 					}
 				}
@@ -210,30 +206,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case "l":
-				// Clear existing data and prepare to fetch new data for the selected table
-				m.tableData = nil        // Clear previous data
-				m.dataScrollOffset = 0   // Reset scroll position
-				m.selectedDataIndex = 0  // Reset selected index
-				m.lastEvaluatedKey = nil // Clear pagination key
-				m.focus = focusDataBox   // Switch focus to the data box
+				m.tableData = nil
+				m.dataScrollOffset = 0
+				m.selectedDataIndex = 0
+				m.focus = focusDataBox
 				selectedTable := m.filtered[m.selectedIndex]
-				return m, m.fetchTableData(selectedTable, nil)
+				return m, m.fetchAllData(selectedTable)
 			}
 		}
 
-		// Scrollable data box navigation when focused
 		if m.focus == focusDataBox {
 			switch msg.String() {
 			case "j":
 				if m.selectedDataIndex < len(m.tableData)-1 {
 					m.selectedDataIndex++
-					if m.selectedDataIndex >= m.dataScrollOffset+5 { // Adjust for visible rows
+					if m.selectedDataIndex >= m.dataScrollOffset+5 {
 						m.dataScrollOffset++
 					}
-				} else if m.lastEvaluatedKey != nil {
-					// If we're at the bottom and there's more data to load, fetch the next batch
-					selectedTable := m.filtered[m.selectedIndex]
-					return m, m.fetchTableData(selectedTable, m.lastEvaluatedKey)
 				}
 			case "k":
 				if m.selectedDataIndex > 0 {
@@ -243,7 +232,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case " ":
-				// Handle space for selecting items (or toggling selection, if implemented)
 				fmt.Printf("Selected item: %v\n", m.tableData[m.selectedDataIndex])
 			}
 		}
@@ -251,36 +239,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-
-		case "s":
-			m.focus = focusTableInput
-			m.tableInput.Focus()
-			return m, nil
-
-		case "d":
-			if m.focus == focusTableInput && !m.tableInput.Focused() {
-				now := time.Now()
-				if m.ddBuffer == "d" && now.Sub(m.lastKeyTime) < 500*time.Millisecond {
-					m.tableInput.SetValue("")
-					m.filtered = filterTables(m.tables, "")
-					m.ddBuffer = ""
-				} else {
-					m.ddBuffer = "d"
-					m.lastKeyTime = now
-				}
-			}
-
-		case "i":
-			if m.focus == focusTableInput && !m.tableInput.Focused() {
-				m.tableInput.Focus()
-				return m, nil
-			}
-
-		default:
-			m.ddBuffer = ""
 		}
 	}
-
 	return m, nil
 }
 
@@ -302,7 +262,6 @@ func (m model) View() string {
 		Padding(0, 1)
 	regionContent := regionBoxStyle.Render(fmt.Sprintf("AWS Region: %s", m.region))
 
-	// Table list box
 	tableListHeight := containerHeight - 11
 	visibleCount := tableListHeight / 1
 
@@ -314,7 +273,7 @@ func (m model) View() string {
 	if m.focus == focusTableList {
 		tableListStyle = tableListStyle.BorderForeground(lipgloss.Color("10"))
 	}
-	// Render table list content with scrolling
+
 	visibleItems := m.filtered[m.scrollOffset:]
 	if len(visibleItems) > visibleCount {
 		visibleItems = visibleItems[:visibleCount]
@@ -331,7 +290,6 @@ func (m model) View() string {
 	}
 	tableListContent = tableListStyle.Render(tableListContent)
 
-	// Text input box
 	leftBottomBoxStyle := lipgloss.NewStyle().
 		Width(leftWidth).
 		Height(3).
@@ -344,7 +302,6 @@ func (m model) View() string {
 
 	leftColumn := lipgloss.JoinVertical(lipgloss.Top, regionContent, tableListContent, inputContent)
 
-	// Right box: Data view in compact single-line JSON format
 	rightWidth := containerWidth - leftWidth - 4
 	rightBoxStyle := lipgloss.NewStyle().
 		Width(rightWidth).
@@ -354,27 +311,24 @@ func (m model) View() string {
 	if m.focus == focusDataBox {
 		rightBoxStyle = rightBoxStyle.BorderForeground(lipgloss.Color("10"))
 	}
-	// Render data content as compact JSON with scrolling and truncation
+
 	visibleData := m.tableData[m.dataScrollOffset:]
 	if len(visibleData) > visibleCount {
 		visibleData = visibleData[:visibleCount]
 	}
 	dataContent := ""
 	for i, item := range visibleData {
-		// Convert DynamoDB item to JSON
 		goMap, err := dynamoItemToMap(item)
 		if err != nil {
 			dataContent += fmt.Sprintf("Error: %v\n", err)
 			continue
 		}
-		// Compact JSON format without indentation
 		jsonData, _ := json.Marshal(goMap)
 		row := string(jsonData)
 
-		// Truncate row if it exceeds the box width and add ellipsis
-		maxWidth := rightWidth - 4 // Adjust for padding/border
+		maxWidth := rightWidth - 4
 		if len(row) > maxWidth {
-			row = row[:maxWidth-3] + "..." // Truncate and add "..."
+			row = row[:maxWidth-3] + "..."
 		}
 
 		if i+m.dataScrollOffset == m.selectedDataIndex {
@@ -387,7 +341,6 @@ func (m model) View() string {
 	}
 	rightBoxContent := rightBoxStyle.Render(dataContent)
 
-	// Main container
 	containerStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Width(containerWidth).
@@ -405,23 +358,18 @@ func filterTables(tables []string, filterText string) []string {
 		tableLower := strings.ToLower(table)
 		matchIndex := 0
 
-		// Fuzzy match: check if all characters of filterText appear in tableLower in order
 		for i := 0; i < len(tableLower) && matchIndex < len(filterText); i++ {
 			if tableLower[i] == filterText[matchIndex] {
 				matchIndex++
 			}
 		}
-
-		// If we matched all characters in filterText, add table to the results
 		if matchIndex == len(filterText) {
 			filtered = append(filtered, table)
 		}
 	}
-
 	return filtered
 }
 
-// Convert DynamoDB item to a regular Go map for JSON encoding
 func dynamoItemToMap(item map[string]types.AttributeValue) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
 	for key, value := range item {
@@ -434,7 +382,6 @@ func dynamoItemToMap(item map[string]types.AttributeValue) (map[string]interface
 	return result, nil
 }
 
-// Recursively convert DynamoDB AttributeValue to an interface for JSON marshalling
 func attributeValueToInterface(av types.AttributeValue) (interface{}, error) {
 	switch v := av.(type) {
 	case *types.AttributeValueMemberS:
