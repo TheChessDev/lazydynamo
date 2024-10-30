@@ -210,7 +210,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case "l":
-				// Fetch data for the selected table and switch focus on successful load
+				// Clear existing data and prepare to fetch new data for the selected table
+				m.tableData = nil        // Clear previous data
+				m.dataScrollOffset = 0   // Reset scroll position
+				m.selectedDataIndex = 0  // Reset selected index
+				m.lastEvaluatedKey = nil // Clear pagination key
+				m.focus = focusDataBox   // Switch focus to the data box
 				selectedTable := m.filtered[m.selectedIndex]
 				return m, m.fetchTableData(selectedTable, nil)
 			}
