@@ -26,7 +26,7 @@ const (
 	focusRegionBox focus = iota
 	focusTableInput
 	focusTableList
-	focusRight
+	focusDataBox
 )
 
 type model struct {
@@ -197,12 +197,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "l":
 				// Fetch data for selected table
 				selectedTable := m.filtered[m.selectedIndex]
+				m.focus = focusDataBox
 				return m, m.fetchTableData(selectedTable)
 			}
 		}
 
 		// Scrollable data box navigation when focused
-		if m.focus == focusRight {
+		if m.focus == focusDataBox {
 			switch msg.String() {
 			case "j":
 				if m.selectedDataIndex < len(m.tableData)-1 {
@@ -327,7 +328,7 @@ func (m model) View() string {
 		Height(containerHeight-4).
 		Border(lipgloss.RoundedBorder()).
 		Padding(1, 1)
-	if m.focus == focusRight {
+	if m.focus == focusDataBox {
 		rightBoxStyle = rightBoxStyle.BorderForeground(lipgloss.Color("10"))
 	}
 	// Render data content with scrolling
