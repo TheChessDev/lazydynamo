@@ -6,13 +6,8 @@ import (
 	"os"
 	"strings"
 
-	// "encoding/json"
 	"fmt"
 	"log"
-
-	// "os"
-	"sync"
-	"time"
 
 	"github.com/TheChessDev/lazydynamo/internals/components"
 	"golang.org/x/term"
@@ -21,7 +16,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 
@@ -33,10 +27,7 @@ import (
 
 type sessionState int
 
-type DataFetchedMsg []map[string]types.AttributeValue
 type TablesFetchedMsg []list.Item
-
-type FetchErrorMsg struct{ error }
 
 const (
 	ViewingCollections sessionState = iota
@@ -131,9 +122,7 @@ type MainModel struct {
 	focus            sessionState
 	loading          bool
 	region           string
-	tableData        []map[string]types.AttributeValue // To store fetched data
 	tables           []tableNameItem
-	selectedTable    string
 	collectionsList  list.Model
 }
 
@@ -209,9 +198,8 @@ func New() MainModel {
 		loading:         true,
 		help:            help.New(),
 		keys:            keys,
-		tableDataModel:  TableDataModel{}.New(),
+		tableDataModel:  TableDataModel{}.New(client),
 		collectionsList: l,
-		selectedTable:   "",
 	}
 }
 
@@ -253,11 +241,15 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		collectionListHeight := int(adjustedHeightRatio * float64(msg.Height))
 
 		m.collectionsList.SetHeight(collectionListHeight)
+		m.tableDataModel.dataList.SetHeight(collectionListHeight)
 	case TablesFetchedMsg:
 		cmd := m.collectionsList.SetItems(msg)
 		cmds = append(cmds, cmd, m.collectionsList.ToggleSpinner())
 	case TablesFetchStartedMsg:
 		cmds = append(cmds, m.fetchCollections(), m.collectionsList.StartSpinner())
+	case DataFetchedMsg:
+		m.tableDataModel.dataList.SetItems(msg)
+		cmds = append(cmds, cmd, m.tableDataModel.dataList.ToggleSpinner())
 	}
 
 	if !m.EditMode() {
@@ -297,13 +289,14 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.collectionsList.SetShowHelp(false)
 				return m, nil
 			case key.Matches(msg, m.keys.SelectCollection):
-				m.selectedTable = "select collection"
+				m.tableDataModel.selectedTable = "select collection"
 				if !(m.collectionsList.FilterState() == list.Filtering) {
 					i, ok := m.collectionsList.SelectedItem().(tableNameItem)
 					if ok {
-						m.selectedTable = string(i)
+						m.tableDataModel.selectedTable = string(i)
+						m.state = ViewingData
 					}
-					return m, nil
+					cmds = append(cmds, m.tableDataModel.dataList.StartSpinner(), m.tableDataModel.fetchAllData(m.tableDataModel.selectedTable))
 				}
 			}
 		}
@@ -321,6 +314,9 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+
+		m.tableDataModel.dataList, cmd = m.tableDataModel.dataList.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
@@ -337,6 +333,8 @@ func (m MainModel) View() string {
 	leftWidth := int(0.3 * float64(width))
 
 	m.collectionsList.SetWidth(leftWidth - 5)
+
+	m.tableDataModel.dataList.SetWidth(width - leftWidth - 4)
 
 	var s string
 
@@ -356,6 +354,8 @@ func (m MainModel) View() string {
 		tableListPane = components.NewDefaultBoxWithLabel(BoxActiveColor, lipgloss.Left, lipgloss.Left)
 	}
 
+	dataContent := m.tableDataModel.dataList.View()
+
 	s += lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		lipgloss.JoinVertical(
@@ -363,7 +363,7 @@ func (m MainModel) View() string {
 			awsRegionPane.Render("AWS Region", m.region, leftWidth, 3),
 			tableListPane.Render("Collections", m.collectionsList.View(), leftWidth, height-11),
 		),
-		tableDataPane.Render("Data", m.selectedTable, width-leftWidth-4, height-6),
+		tableDataPane.Render("Data", dataContent, width-leftWidth-4, height-6),
 	)
 
 	if m.state != ViewingCollections {
@@ -403,49 +403,5 @@ func (m MainModel) fetchCollections() tea.Cmd {
 			}
 		}
 		return TablesFetchedMsg(tableNames)
-	}
-}
-
-// Command to fetch all data concurrently from a DynamoDB table
-func (m MainModel) fetchAllData(tableName string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-
-		var allItems []map[string]types.AttributeValue
-		var wg sync.WaitGroup
-		var mu sync.Mutex
-		lastEvaluatedKeys := []map[string]types.AttributeValue{nil} // Start with initial key
-
-		for _, startKey := range lastEvaluatedKeys {
-			wg.Add(1)
-			go func(startKey map[string]types.AttributeValue) {
-				defer wg.Done()
-				for {
-					input := &dynamodb.ScanInput{
-						TableName:         &tableName,
-						Limit:             aws.Int32(100),
-						ExclusiveStartKey: startKey,
-					}
-					output, err := m.client.Scan(ctx, input)
-					if err != nil {
-						log.Printf("Failed to fetch data from DynamoDB: %v", err)
-						return
-					}
-
-					mu.Lock()
-					allItems = append(allItems, output.Items...)
-					mu.Unlock()
-
-					if output.LastEvaluatedKey == nil {
-						break
-					}
-					startKey = output.LastEvaluatedKey
-				}
-			}(startKey)
-		}
-
-		wg.Wait()
-		return DataFetchedMsg(allItems) // Send message with all fetched data
 	}
 }

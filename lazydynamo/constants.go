@@ -6,3 +6,5 @@ const (
 	BoxActiveColor  = lipgloss.Color("10")
 	BoxDefaultColor = lipgloss.Color("#ffffff")
 )
+
+type FetchErrorMsg struct{ error }
