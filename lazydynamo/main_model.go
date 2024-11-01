@@ -183,7 +183,7 @@ func New() MainModel {
 
 	client := dynamodb.NewFromConfig(cfg)
 
-	items := []list.Item{tableNameItem(LoadingCollectionsMsg)}
+	items := []list.Item{}
 
 	l := list.New(items, itemDelegate{}, 10, 10)
 
@@ -207,7 +207,7 @@ func New() MainModel {
 }
 
 func (m MainModel) Init() tea.Cmd {
-	return m.fetchTables()
+	return tea.Batch(m.collectionsList.StartSpinner(), m.fetchTables())
 }
 
 func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -221,8 +221,29 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// If we set a width on the help menu it can gracefully truncate
 		// its view as needed.
 		m.help.Width = msg.Width
-		m.collectionsList.SetHeight(int(0.7 * float64(msg.Height)))
-		fmt.Println("height from msg", msg.Height)
+
+		// Base height percentage for the list when width is ample
+		baseHeightRatio := 0.7
+
+		// Calculate the aspect ratio (width-to-height ratio)
+		aspectRatio := float64(msg.Width) / float64(msg.Height)
+
+		// Adjust the height ratio based on the aspect ratio
+		adjustedHeightRatio := baseHeightRatio * aspectRatio
+
+		// Clamp the adjustedHeightRatio to a reasonable range, so it doesn't go too low or high
+		if adjustedHeightRatio > 2.2 {
+			adjustedHeightRatio = 0.7 // Set a maximum height ratio
+		} else if adjustedHeightRatio < 2.2 && adjustedHeightRatio > 0.96 {
+			adjustedHeightRatio = 0.3
+		} else if adjustedHeightRatio < 0.96 {
+			adjustedHeightRatio = 0.2
+		}
+
+		// Calculate the final list height based on the adjusted height ratio
+		collectionListHeight := int(adjustedHeightRatio * float64(msg.Height))
+
+		m.collectionsList.SetHeight(collectionListHeight)
 	case TablesFetchedMsg:
 		cmd := m.collectionsList.SetItems(msg)
 		cmds = append(cmds, cmd)
@@ -287,8 +308,6 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m MainModel) View() string {
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
-
-	fmt.Println("height from term", height)
 
 	if err != nil {
 		fmt.Println("Error getting terminal size:", err)
