@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -46,15 +47,16 @@ const (
 // keyMap defines a set of keybindings. To work for help it must satisfy
 // key.Map. It could also very easily be a map[string]key.Binding.
 type keyMap struct {
-	Collections key.Binding
-	Data        key.Binding
-	Down        key.Binding
-	Help        key.Binding
-	Left        key.Binding
-	Quit        key.Binding
-	Right       key.Binding
-	Up          key.Binding
-	ViewMode    key.Binding
+	Collections      key.Binding
+	Data             key.Binding
+	Down             key.Binding
+	Help             key.Binding
+	Left             key.Binding
+	Quit             key.Binding
+	Right            key.Binding
+	Up               key.Binding
+	ViewMode         key.Binding
+	SelectCollection key.Binding
 }
 
 // ShortHelp returns keybindings to be shown in the mini help view. It's part
@@ -81,6 +83,10 @@ var keys = keyMap{
 		key.WithKeys("c"),
 		key.WithHelp("c", "Go to Collections"),
 	),
+	SelectCollection: key.NewBinding(
+		key.WithKeys(tea.KeySpace.String()),
+		key.WithHelp("space", "Select Collection"),
+	),
 	Up: key.NewBinding(
 		key.WithKeys("up", "k"),
 		key.WithHelp("↑/k", "move up"),
@@ -102,7 +108,7 @@ var keys = keyMap{
 		key.WithHelp("?", "toggle help"),
 	),
 	ViewMode: key.NewBinding(
-		key.WithKeys("esc"),
+		key.WithKeys(tea.KeyEsc.String()),
 		key.WithHelp("esc", "view mode"),
 	),
 	Quit: key.NewBinding(
@@ -158,10 +164,6 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 	fn := itemStyle.Render
 	if index == m.Index() {
 		fn = func(s ...string) string {
-			if strings.Join(s, " ") == LoadingCollectionsMsg {
-				return selectedItemStyle.Render(strings.Join(s, " "))
-			}
-
 			return selectedItemStyle.Render("> " + strings.Join(s, " "))
 		}
 	}
@@ -187,12 +189,18 @@ func New() MainModel {
 
 	l := list.New(items, itemDelegate{}, 10, 10)
 
-	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.Styles.PaginationStyle = paginationStyle
 	l.SetShowHelp(true)
 	l.SetShowFilter(true)
 	l.KeyMap.Quit.SetKeys("q", "ctrl-c")
+	l.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{keys.SelectCollection}
+	}
+	l.SetSpinner(spinner.Dot)
+	l.Styles.Spinner = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	l.Title = ""
+	l.Styles.Title = lipgloss.NewStyle()
 
 	return MainModel{
 		state:           ViewingCollections,
@@ -203,11 +211,12 @@ func New() MainModel {
 		keys:            keys,
 		tableDataModel:  TableDataModel{}.New(),
 		collectionsList: l,
+		selectedTable:   "",
 	}
 }
 
 func (m MainModel) Init() tea.Cmd {
-	return tea.Batch(m.collectionsList.StartSpinner(), m.fetchTables())
+	return m.startTableFetch()
 }
 
 func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -246,7 +255,9 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.collectionsList.SetHeight(collectionListHeight)
 	case TablesFetchedMsg:
 		cmd := m.collectionsList.SetItems(msg)
-		cmds = append(cmds, cmd)
+		cmds = append(cmds, cmd, m.collectionsList.ToggleSpinner())
+	case TablesFetchStartedMsg:
+		cmds = append(cmds, m.fetchTables(), m.collectionsList.StartSpinner())
 	}
 
 	if !m.EditMode() {
@@ -285,6 +296,15 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = ViewMode
 				m.collectionsList.SetShowHelp(false)
 				return m, nil
+			case key.Matches(msg, m.keys.SelectCollection):
+				m.selectedTable = "select collection"
+				if !(m.collectionsList.FilterState() == list.Filtering) {
+					i, ok := m.collectionsList.SelectedItem().(tableNameItem)
+					if ok {
+						m.selectedTable = string(i)
+					}
+					return m, nil
+				}
 			}
 		}
 
@@ -343,7 +363,7 @@ func (m MainModel) View() string {
 			awsRegionPane.Render("AWS Region", m.region, leftWidth, 3),
 			tableListPane.Render("Collections", m.collectionsList.View(), leftWidth, height-11),
 		),
-		tableDataPane.Render("Data", "right", width-leftWidth-4, height-6),
+		tableDataPane.Render("Data", m.selectedTable, width-leftWidth-4, height-6),
 	)
 
 	if m.state != ViewingCollections {
@@ -355,6 +375,15 @@ func (m MainModel) View() string {
 
 func (m *MainModel) EditMode() bool {
 	return m.state == ViewingCollections
+}
+
+type TablesFetchStartedMsg string
+
+// Command to fetch tables from DynamoDB
+func (m MainModel) startTableFetch() tea.Cmd {
+	return func() tea.Msg {
+		return TablesFetchStartedMsg("started")
+	}
 }
 
 // Command to fetch tables from DynamoDB
