@@ -21,7 +21,6 @@ func main() {
 
 	// Set up logging to the temporary file
 	tea.LogToFile(f.Name(), "lazydynamo")
-	fmt.Printf("Debug log created at %s\n", f.Name())
 
 	defer func() {
 		f.Close()           // Close the file

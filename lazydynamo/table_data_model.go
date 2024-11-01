@@ -82,7 +82,8 @@ func (k TableDataKeyMap) ShortHelp() []key.Binding {
 func (k TableDataKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down},   // first column
-		{k.Help, k.Quit}, // second column
+		{k.SelectRow},    // second column
+		{k.Help, k.Quit}, // third column
 	}
 }
 
@@ -96,8 +97,8 @@ var tableDataKeys = TableDataKeyMap{
 		key.WithHelp("↓/j", "move down"),
 	),
 	SelectRow: key.NewBinding(
-		key.WithKeys(tea.KeySpace.String()),
-		key.WithHelp("space", "select row"),
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "select row"),
 	),
 	Help: key.NewBinding(
 		key.WithKeys("?"),
@@ -115,6 +116,7 @@ type TableDataModel struct {
 	selectedTable string
 	client        *dynamodb.Client
 	dataList      list.Model
+	selectedRow   string
 }
 
 func (m TableDataModel) New(client *dynamodb.Client) TableDataModel {

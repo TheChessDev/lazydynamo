@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -35,6 +36,7 @@ const (
 	ViewingCollections sessionState = iota
 	ViewingData
 	ViewMode
+	ViewingRow
 )
 
 // keyMap defines a set of keybindings. To work for help it must satisfy
@@ -77,8 +79,8 @@ var keys = keyMap{
 		key.WithHelp("c", "Go to Collections"),
 	),
 	SelectCollection: key.NewBinding(
-		key.WithKeys(tea.KeySpace.String()),
-		key.WithHelp("space", "Select Collection"),
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "Select Collection"),
 	),
 	Up: key.NewBinding(
 		key.WithKeys("up", "k"),
@@ -113,6 +115,7 @@ var keys = keyMap{
 type MainModel struct {
 	state          sessionState
 	tableDataModel TableDataModel
+	viewRowModel   ViewRowModel
 
 	keys keyMap
 	help help.Model
@@ -125,6 +128,8 @@ type MainModel struct {
 	region           string
 	tables           []tableNameItem
 	collectionsList  list.Model
+
+	viewport viewport.Model
 }
 
 var (
@@ -150,6 +155,13 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 	}
 
 	str := fmt.Sprintf("%s", i)
+
+	modelWidth := m.Width()
+	maxWidth := modelWidth - 3
+
+	if len(str) > maxWidth {
+		str = str[:maxWidth-3] + "..." // Truncate and add ellipsis
+	}
 
 	fn := itemStyle.Render
 	if index == m.Index() {
@@ -200,6 +212,7 @@ func New() MainModel {
 		help:            help.New(),
 		keys:            keys,
 		tableDataModel:  TableDataModel{}.New(client),
+		viewRowModel:    ViewRowModel{}.New(),
 		collectionsList: l,
 	}
 }
@@ -248,6 +261,10 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.collectionsList.SetHeight(collectionListHeight)
 		m.tableDataModel.dataList.SetHeight(dataListHeight)
+
+		leftWidth := int(0.3 * float64(msg.Width))
+		m.viewport = viewport.New(msg.Width-leftWidth-6, msg.Height-10)
+
 	case TablesFetchedMsg:
 		cmd := m.collectionsList.SetItems(msg)
 		cmds = append(cmds, cmd, m.collectionsList.ToggleSpinner())
@@ -255,6 +272,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.fetchCollections(), m.collectionsList.StartSpinner())
 	case DataFetchedMsg:
 		m.tableDataModel.dataList.SetItems(msg)
+		m.state = ViewingData
 		cmds = append(cmds, cmd, m.tableDataModel.dataList.ToggleSpinner())
 	}
 
@@ -292,15 +310,12 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch {
 			case key.Matches(msg, m.keys.ViewMode):
 				m.state = ViewMode
-				m.collectionsList.SetShowHelp(false)
 				return m, nil
 			case key.Matches(msg, m.keys.SelectCollection):
-				m.tableDataModel.selectedTable = "select collection"
 				if !(m.collectionsList.FilterState() == list.Filtering) {
 					i, ok := m.collectionsList.SelectedItem().(tableNameItem)
 					if ok {
 						m.tableDataModel.selectedTable = string(i)
-						m.state = ViewingData
 					}
 					cmds = append(cmds, m.tableDataModel.dataList.StartSpinner(), m.tableDataModel.fetchAllData(m.tableDataModel.selectedTable))
 				}
@@ -312,16 +327,60 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.state == ViewingData {
+		m.collectionsList.SetShowHelp(false)
+
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch {
 			case key.Matches(msg, m.keys.ViewMode):
 				m.state = ViewMode
 				return m, nil
+
+			case key.Matches(msg, m.tableDataModel.keys.SelectRow):
+				if !(m.tableDataModel.dataList.FilterState() == list.Filtering) {
+					i, ok := m.tableDataModel.dataList.SelectedItem().(tableDataRow)
+					if ok {
+						m.tableDataModel.selectedRow = string(i)
+
+						var dataContent string
+						var err error
+						dataContent, err = tools.RenderJSONWithGlamour(m.tableDataModel.selectedRow)
+
+						if err != nil {
+							dataContent = "Could not render row."
+						}
+
+						m.viewport.SetContent(dataContent)
+
+						m.state = ViewingRow
+					}
+				}
 			}
 		}
 
 		m.tableDataModel.dataList, cmd = m.tableDataModel.dataList.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	if m.state == ViewingRow {
+		m.collectionsList.SetShowHelp(false)
+
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch {
+			case key.Matches(msg, m.keys.ViewMode):
+				m.state = ViewingData
+				return m, nil
+			case key.Matches(msg, m.viewRowModel.keys.Down):
+				m.viewport.ViewDown()
+				return m, nil
+			case key.Matches(msg, m.viewRowModel.keys.Up):
+				m.viewport.ViewUp()
+				return m, nil
+			}
+		}
+
+		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -352,12 +411,19 @@ func (m MainModel) View() string {
 
 	helpView := m.help.View(m.keys)
 
+	dataContent := m.tableDataModel.dataList.View()
+
 	switch m.state {
 	case ViewingData:
 		helpView = m.help.View(m.tableDataModel.keys)
 		tableDataPane = components.NewDefaultBoxWithLabel(BoxActiveColor, lipgloss.Left, lipgloss.Left)
 	case ViewingCollections:
 		tableListPane = components.NewDefaultBoxWithLabel(BoxActiveColor, lipgloss.Left, lipgloss.Left)
+	case ViewingRow:
+		helpView = m.help.View(m.viewRowModel.keys)
+		tableDataPane = components.NewDefaultBoxWithLabel(BoxActiveColor, lipgloss.Left, lipgloss.Left)
+
+		dataContent = m.viewport.View()
 	}
 
 	s += lipgloss.JoinHorizontal(
@@ -367,14 +433,31 @@ func (m MainModel) View() string {
 			awsRegionPane.Render("AWS Region", m.region, leftWidth, 3),
 			tableListPane.Render("Collections", m.collectionsList.View(), leftWidth, height-11),
 		),
-		tableDataPane.Render("Data", m.tableDataModel.dataList.View(), width-leftWidth-4, height-6),
+		tableDataPane.Render("Data", dataContent, width-leftWidth-4, height-6),
 	)
+
+	s += lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true).Render("\n" + m.GetCurrentState() + "\n")
 
 	if m.state != ViewingCollections {
 		s += "\n" + helpView
 	}
 
 	return s
+}
+
+func (m MainModel) GetCurrentState() string {
+	switch m.state {
+	case ViewMode:
+		return "View Mode"
+	case ViewingData:
+		return "View Data"
+	case ViewingRow:
+		return "View Row"
+	case ViewingCollections:
+		return "View Collections"
+	default:
+		return "View Mode"
+	}
 }
 
 func (m *MainModel) EditMode() bool {
