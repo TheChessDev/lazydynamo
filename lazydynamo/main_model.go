@@ -5,11 +5,13 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"fmt"
 	"log"
 
 	"github.com/TheChessDev/lazydynamo/internals/components"
+	"github.com/TheChessDev/lazydynamo/internals/tools"
 	"golang.org/x/term"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -110,7 +112,6 @@ var keys = keyMap{
 
 type MainModel struct {
 	state          sessionState
-	tableListModel TableListModel
 	tableDataModel TableDataModel
 
 	keys keyMap
@@ -388,23 +389,60 @@ func (m MainModel) startCollectionsFetch() tea.Cmd {
 	}
 }
 
-// Command to fetch tables from DynamoDB
+// fetchCollections with cache fallback and fetch if cache is missing
 func (m MainModel) fetchCollections() tea.Cmd {
 	return func() tea.Msg {
-		var tableNames []list.Item
-		input := &dynamodb.ListTablesInput{}
-		paginator := dynamodb.NewListTablesPaginator(m.client, input)
+		// Attempt to load cached data
+		cache, err := tools.LoadCache(CollectionsCacheFilePath)
+		if err == nil && time.Since(cache.Updated) < CacheDuration {
+			// Return cached data immediately
+			go m.refreshCacheInBackground() // Trigger background fetch in the background
 
-		for paginator.HasMorePages() {
-			page, err := paginator.NextPage(context.TODO())
-			if err != nil {
-				return FetchErrorMsg{err}
+			// Convert cached data to list.Item
+			var items []list.Item
+			for _, value := range cache.Data {
+				items = append(items, tableNameItem(value))
 			}
-
-			for _, tableName := range page.TableNames {
-				tableNames = append(tableNames, tableNameItem(tableName))
-			}
+			return TablesFetchedMsg(items)
 		}
-		return TablesFetchedMsg(tableNames)
+
+		// If cache is missing or outdated, fetch data and cache it
+		return m.fetchAndCacheCollections()
+	}
+}
+
+// fetchAndCacheCollections performs an immediate fetch from DynamoDB and caches the result
+func (m MainModel) fetchAndCacheCollections() tea.Msg {
+	var tableNames []list.Item
+	input := &dynamodb.ListTablesInput{}
+	paginator := dynamodb.NewListTablesPaginator(m.client, input)
+
+	// Fetch table names from DynamoDB
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(context.TODO())
+		if err != nil {
+			return FetchErrorMsg{err}
+		}
+		for _, tableName := range page.TableNames {
+			tableNames = append(tableNames, tableNameItem(tableName))
+		}
+	}
+
+	// Cache the fetched data
+	if err := tools.SaveCache(tableNames, CacheDir, CollectionsCacheFilePath); err != nil {
+		log.Println("Failed to save cache:", err)
+	}
+
+	return TablesFetchedMsg(tableNames)
+}
+
+// refreshCacheInBackground fetches fresh data and updates the cache in the background
+func (m MainModel) refreshCacheInBackground() {
+	// Perform a fetch and cache update in the background
+	msg := m.fetchAndCacheCollections()
+	if fetchMsg, ok := msg.(TablesFetchedMsg); ok {
+		// Handle the result if needed (e.g., update the UI with fresh data)
+		// This step is optional depending on your app's needs
+		log.Println("Cache refreshed in background:", fetchMsg)
 	}
 }
