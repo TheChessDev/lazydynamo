@@ -2,7 +2,10 @@ package lazydynamo
 
 import (
 	"context"
+	"io"
 	"os"
+	"strings"
+
 	// "encoding/json"
 	"fmt"
 	"log"
@@ -14,14 +17,12 @@ import (
 	"github.com/TheChessDev/lazydynamo/internals/components"
 	"golang.org/x/term"
 
-	// "golang.org/x/term"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/list"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -32,13 +33,12 @@ import (
 type sessionState int
 
 type DataFetchedMsg []map[string]types.AttributeValue
-type TablesFetchedMsg []string
+type TablesFetchedMsg []list.Item
 
 type FetchErrorMsg struct{ error }
 
 const (
-	FilteringCollections sessionState = iota
-	ViewingCollections
+	ViewingCollections sessionState = iota
 	ViewingData
 	ViewMode
 )
@@ -46,16 +46,15 @@ const (
 // keyMap defines a set of keybindings. To work for help it must satisfy
 // key.Map. It could also very easily be a map[string]key.Binding.
 type keyMap struct {
-	Collections       key.Binding
-	CollectionsFilter key.Binding
-	Data              key.Binding
-	Down              key.Binding
-	Help              key.Binding
-	Left              key.Binding
-	Quit              key.Binding
-	Right             key.Binding
-	Up                key.Binding
-	ViewMode          key.Binding
+	Collections key.Binding
+	Data        key.Binding
+	Down        key.Binding
+	Help        key.Binding
+	Left        key.Binding
+	Quit        key.Binding
+	Right       key.Binding
+	Up          key.Binding
+	ViewMode    key.Binding
 }
 
 // ShortHelp returns keybindings to be shown in the mini help view. It's part
@@ -68,8 +67,8 @@ func (k keyMap) ShortHelp() []key.Binding {
 // key.Map interface.
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.CollectionsFilter, k.Collections, k.Data}, // first column
-		{k.Help, k.Quit}, // second column
+		{k.Collections, k.Data}, // first column
+		{k.Help, k.Quit},        // second column
 	}
 }
 
@@ -81,10 +80,6 @@ var keys = keyMap{
 	Collections: key.NewBinding(
 		key.WithKeys("c"),
 		key.WithHelp("c", "Go to Collections"),
-	),
-	CollectionsFilter: key.NewBinding(
-		key.WithKeys("s"),
-		key.WithHelp("s", "Search Collections"),
 	),
 	Up: key.NewBinding(
 		key.WithKeys("up", "k"),
@@ -117,36 +112,64 @@ var keys = keyMap{
 }
 
 type MainModel struct {
-	state            sessionState
-	tableFilterModel TableFilterModel
-	tableListModel   TableListModel
-	tableDataModel   TableDataModel
+	state          sessionState
+	tableListModel TableListModel
+	tableDataModel TableDataModel
 
 	keys keyMap
 	help help.Model
 
-	client            *dynamodb.Client
-	dataScrollOffset  int
-	ddBuffer          string
-	filtered          []string
-	focus             sessionState
-	loading           bool
-	region            string
-	scrollOffset      int
-	selectedDataIndex int
-	selectedIndex     int
-	tableData         []map[string]types.AttributeValue // To store fetched data
-	tableInput        textinput.Model
-	tables            []string
+	client           *dynamodb.Client
+	dataScrollOffset int
+	ddBuffer         string
+	focus            sessionState
+	loading          bool
+	region           string
+	tableData        []map[string]types.AttributeValue // To store fetched data
+	tables           []tableNameItem
+	selectedTable    string
+	collectionsList  list.Model
+}
+
+var (
+	titleStyle        = lipgloss.NewStyle().MarginLeft(2)
+	itemStyle         = lipgloss.NewStyle().PaddingLeft(4)
+	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("10"))
+	paginationStyle   = list.DefaultStyles().PaginationStyle.PaddingLeft(4)
+)
+
+type tableNameItem string
+
+func (i tableNameItem) FilterValue() string { return string(i) }
+
+type itemDelegate struct{}
+
+func (d itemDelegate) Height() int                             { return 1 }
+func (d itemDelegate) Spacing() int                            { return 0 }
+func (d itemDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	i, ok := listItem.(tableNameItem)
+	if !ok {
+		return
+	}
+
+	str := fmt.Sprintf("%s", i)
+
+	fn := itemStyle.Render
+	if index == m.Index() {
+		fn = func(s ...string) string {
+			if strings.Join(s, " ") == LoadingCollectionsMsg {
+				return selectedItemStyle.Render(strings.Join(s, " "))
+			}
+
+			return selectedItemStyle.Render("> " + strings.Join(s, " "))
+		}
+	}
+
+	fmt.Fprint(w, fn(str))
 }
 
 func New() MainModel {
-	ti := textinput.New()
-	ti.Placeholder = "Search tables..."
-	ti.Focus()
-	ti.CharLimit = 156
-	ti.Width = 20
-
 	// Load AWS config with custom retry settings
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"),
 		config.WithRetryer(func() aws.Retryer {
@@ -160,31 +183,49 @@ func New() MainModel {
 
 	client := dynamodb.NewFromConfig(cfg)
 
+	items := []list.Item{tableNameItem(LoadingCollectionsMsg)}
+
+	l := list.New(items, itemDelegate{}, 10, 10)
+
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.Styles.PaginationStyle = paginationStyle
+	l.SetShowHelp(true)
+	l.SetShowFilter(true)
+	l.KeyMap.Quit.SetKeys("q", "ctrl-c")
+
 	return MainModel{
-		focus:            FilteringCollections,
-		region:           "us-east-1",
-		tableInput:       ti,
-		client:           client,
-		loading:          true,
-		help:             help.New(),
-		keys:             keys,
-		tableDataModel:   TableDataModel{}.New(),
-		tableFilterModel: TableFilterModel{}.New(),
+		state:           ViewingCollections,
+		region:          "us-east-1",
+		client:          client,
+		loading:         true,
+		help:            help.New(),
+		keys:            keys,
+		tableDataModel:  TableDataModel{}.New(),
+		collectionsList: l,
 	}
 }
 
 func (m MainModel) Init() tea.Cmd {
-	// return tea.Batch(textinput.Blink, m.fetchTables())
-
-	return textinput.Blink
+	return m.fetchTables()
 }
 
 func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var (
+		cmds []tea.Cmd
+		cmd  tea.Cmd
+	)
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// If we set a width on the help menu it can gracefully truncate
 		// its view as needed.
 		m.help.Width = msg.Width
+		m.collectionsList.SetHeight(int(0.7 * float64(msg.Height)))
+		fmt.Println("height from msg", msg.Height)
+	case TablesFetchedMsg:
+		cmd := m.collectionsList.SetItems(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	if !m.EditMode() {
@@ -199,41 +240,6 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.state == FilteringCollections && m.tableInput.Focused() {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch {
-			case key.Matches(msg, m.tableFilterModel.keys.ExitInsertMode):
-				m.tableInput.Blur()
-				return m, nil
-			}
-		}
-
-		var cmd tea.Cmd
-		m.tableInput, cmd = m.tableInput.Update(msg)
-		return m, cmd
-	}
-
-	if m.state == FilteringCollections && !m.tableInput.Focused() {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch {
-			case key.Matches(msg, m.tableFilterModel.keys.ExitInsertMode):
-				m.state = ViewMode
-				return m, nil
-			case key.Matches(msg, m.tableFilterModel.keys.InsertMode):
-				m.tableInput.Focus()
-				return m, nil
-			case key.Matches(msg, m.tableFilterModel.keys.InsertMode):
-				m.tableInput.Focus()
-				return m, nil
-			case key.Matches(msg, m.tableFilterModel.keys.ClearSearch):
-				m.tableInput.SetValue("")
-				return m, nil
-			}
-		}
-	}
-
 	if m.state == ViewMode {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
@@ -243,21 +249,46 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case key.Matches(msg, m.keys.Collections):
 				m.state = ViewingCollections
-				return m, nil
-			case key.Matches(msg, m.keys.CollectionsFilter):
-				m.state = FilteringCollections
-				m.tableInput.Focus()
+				m.collectionsList.SetShowHelp(true)
 				return m, nil
 			}
 		}
 
 	}
 
-	return m, nil
+	if m.state == ViewingCollections {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch {
+			case key.Matches(msg, m.keys.ViewMode):
+				m.state = ViewMode
+				m.collectionsList.SetShowHelp(false)
+				return m, nil
+			}
+		}
+
+		m.collectionsList, cmd = m.collectionsList.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	if m.state == ViewingData {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch {
+			case key.Matches(msg, m.keys.ViewMode):
+				m.state = ViewMode
+				return m, nil
+			}
+		}
+	}
+
+	return m, tea.Batch(cmds...)
 }
 
 func (m MainModel) View() string {
 	width, height, err := term.GetSize(int(os.Stdout.Fd()))
+
+	fmt.Println("height from term", height)
 
 	if err != nil {
 		fmt.Println("Error getting terminal size:", err)
@@ -266,22 +297,19 @@ func (m MainModel) View() string {
 
 	leftWidth := int(0.3 * float64(width))
 
+	m.collectionsList.SetWidth(leftWidth - 5)
+
 	var s string
-	// model := m.currentFocusedModel()
 
 	boxStyle := components.NewDefaultBoxWithLabel(BoxDefaultColor, lipgloss.Left, lipgloss.Left)
 
 	awsRegionPane := components.NewDefaultBoxWithLabel(BoxDefaultColor, lipgloss.Center, lipgloss.Center)
 	tableListPane := boxStyle
-	tableFilterPane := boxStyle
 	tableDataPane := boxStyle
 
 	helpView := m.help.View(m.keys)
 
 	switch m.state {
-	case FilteringCollections:
-		helpView = m.help.View(m.tableFilterModel.keys)
-		tableFilterPane = components.NewDefaultBoxWithLabel(BoxActiveColor, lipgloss.Left, lipgloss.Left)
 	case ViewingData:
 		helpView = m.help.View(m.tableDataModel.keys)
 		tableDataPane = components.NewDefaultBoxWithLabel(BoxActiveColor, lipgloss.Left, lipgloss.Left)
@@ -294,35 +322,26 @@ func (m MainModel) View() string {
 		lipgloss.JoinVertical(
 			lipgloss.Top,
 			awsRegionPane.Render("AWS Region", m.region, leftWidth, 3),
-			tableListPane.Render("Collections", "top left", leftWidth, height-16),
-			tableFilterPane.Render("Search Collections", m.tableInput.View(), leftWidth, 3),
+			tableListPane.Render("Collections", m.collectionsList.View(), leftWidth, height-11),
 		),
 		tableDataPane.Render("Data", "right", width-leftWidth-4, height-6),
 	)
 
-	s += "\n" + helpView
+	if m.state != ViewingCollections {
+		s += "\n" + helpView
+	}
+
 	return s
 }
 
 func (m *MainModel) EditMode() bool {
-	return (m.state == FilteringCollections && m.tableInput.Focused())
-}
-
-func (m MainModel) currentFocusedModel() string {
-	switch m.state {
-	case ViewingData:
-		return "TableData"
-	case ViewingCollections:
-		return "TableList"
-	}
-
-	return "TableFilter"
+	return m.state == ViewingCollections
 }
 
 // Command to fetch tables from DynamoDB
 func (m MainModel) fetchTables() tea.Cmd {
 	return func() tea.Msg {
-		var tableNames []string
+		var tableNames []list.Item
 		input := &dynamodb.ListTablesInput{}
 		paginator := dynamodb.NewListTablesPaginator(m.client, input)
 
@@ -331,7 +350,10 @@ func (m MainModel) fetchTables() tea.Cmd {
 			if err != nil {
 				return FetchErrorMsg{err}
 			}
-			tableNames = append(tableNames, page.TableNames...)
+
+			for _, tableName := range page.TableNames {
+				tableNames = append(tableNames, tableNameItem(tableName))
+			}
 		}
 		return TablesFetchedMsg(tableNames)
 	}

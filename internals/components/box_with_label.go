@@ -25,7 +25,8 @@ func NewDefaultBoxWithLabel(color lipgloss.Color, hAlign lipgloss.Position, vAli
 			PaddingTop(0).
 			PaddingBottom(0).
 			PaddingLeft(1).
-			PaddingRight(1),
+			PaddingRight(1).
+			Foreground(color),
 	}
 }
 
