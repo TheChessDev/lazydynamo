@@ -146,104 +146,143 @@ func (m TableDataModel) New(client *dynamodb.Client) TableDataModel {
 	}
 }
 
-// Command to fetch all data from a DynamoDB table using multiple cores with validated starting keys
+// fetchAllData with cache fallback and fetch if cache is missing
 func (m TableDataModel) fetchAllData(tableName string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
+		// Attempt to load cached data
+		cache, err := tools.LoadCache(tableDataCacheFilePath(tableName))
+		if err == nil && time.Since(cache.Updated) < CacheDuration {
+			// Return cached data immediately
+			go m.refreshTableDataCacheInBackground(tableName) // Trigger background fetch
 
-		// Describe the table to get primary key schema
-		tableInfo, err := m.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
-			TableName: &tableName,
-		})
-		if err != nil {
-			log.Printf("Failed to describe table: %v", err)
-			return FetchErrorMsg{err}
+			var items []list.Item
+			for _, value := range cache.Data {
+				items = append(items, tableDataRow(value))
+			}
+			return DataFetchedMsg(items)
 		}
 
-		// Retrieve the primary key attributes
-		partitionKey, sortKey, err := extractPrimaryKeyAttributes(tableInfo.Table.KeySchema)
-		if err != nil {
-			log.Printf("Failed to retrieve primary key schema: %v", err)
-			return FetchErrorMsg{err}
-		}
-
-		// Get the number of available CPU cores
-		numSegments := runtime.NumCPU()
-		log.Printf("Using %d segments for parallel scan", numSegments)
-
-		var allItems []list.Item // Store data as single-line JSON strings
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		errChan := make(chan error, numSegments)
-
-		// Scan each segment concurrently
-		for segment := 0; segment < numSegments; segment++ {
-			wg.Add(1)
-			go func(segment int) {
-				defer wg.Done()
-				var startKey map[string]types.AttributeValue
-
-				for {
-					// Prepare scan input with the segment details and validated ExclusiveStartKey
-					input := &dynamodb.ScanInput{
-						TableName:         &tableName,
-						Limit:             aws.Int32(100),
-						Segment:           aws.Int32(int32(segment)),
-						TotalSegments:     aws.Int32(int32(numSegments)),
-						ExclusiveStartKey: validateExclusiveStartKey(startKey, partitionKey, sortKey),
-					}
-
-					output, err := m.client.Scan(ctx, input)
-					if err != nil {
-						errChan <- err
-						return
-					}
-
-					// Transform items into JSON strings
-					var jsonItems []list.Item
-					for _, item := range output.Items {
-						mapItem, err := tools.DynamoItemToMap(item)
-						if err != nil {
-							log.Printf("Error converting item: %v", err)
-							continue
-						}
-						jsonData, err := json.Marshal(mapItem)
-						if err != nil {
-							log.Printf("Error marshaling item to JSON: %v", err)
-							continue
-						}
-						jsonItems = append(jsonItems, tableDataRow(string(jsonData)))
-					}
-
-					// Append transformed items to the shared allItems slice
-					mu.Lock()
-					allItems = append(allItems, jsonItems...)
-					mu.Unlock()
-
-					// Check if more items are available
-					if output.LastEvaluatedKey == nil {
-						break
-					}
-
-					// Update startKey for the next scan in this segment
-					startKey = output.LastEvaluatedKey
-				}
-			}(segment)
-		}
-
-		// Wait for all goroutines to finish
-		wg.Wait()
-		close(errChan)
-
-		// Check if there were any errors
-		if err := <-errChan; err != nil {
-			log.Printf("Error in parallel scan: %v", err)
-			return FetchErrorMsg{err}
-		}
-
-		return DataFetchedMsg(allItems)
+		// If cache is missing or outdated, fetch fresh data synchronously
+		return m.fetchAndCacheTableData(tableName)
 	}
+}
+
+// fetchAndCacheTableData performs an immediate fetch from DynamoDB, caches the result, and returns it
+func (m TableDataModel) fetchAndCacheTableData(tableName string) tea.Msg {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Describe the table to get primary key schema
+	tableInfo, err := m.client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
+		TableName: &tableName,
+	})
+	if err != nil {
+		log.Printf("Failed to describe table: %v", err)
+		return FetchErrorMsg{err}
+	}
+
+	// Retrieve the primary key attributes
+	partitionKey, sortKey, err := extractPrimaryKeyAttributes(tableInfo.Table.KeySchema)
+	if err != nil {
+		log.Printf("Failed to retrieve primary key schema: %v", err)
+		return FetchErrorMsg{err}
+	}
+
+	// Get the number of available CPU cores
+	numSegments := runtime.NumCPU()
+	log.Printf("Using %d segments for parallel scan", numSegments)
+
+	var allItems []list.Item // Store data as single-line JSON strings
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	errChan := make(chan error, numSegments)
+
+	// Scan each segment concurrently
+	for segment := 0; segment < numSegments; segment++ {
+		wg.Add(1)
+		go func(segment int) {
+			defer wg.Done()
+			var startKey map[string]types.AttributeValue
+
+			for {
+				// Prepare scan input with the segment details and validated ExclusiveStartKey
+				input := &dynamodb.ScanInput{
+					TableName:         &tableName,
+					Limit:             aws.Int32(100),
+					Segment:           aws.Int32(int32(segment)),
+					TotalSegments:     aws.Int32(int32(numSegments)),
+					ExclusiveStartKey: validateExclusiveStartKey(startKey, partitionKey, sortKey),
+				}
+
+				output, err := m.client.Scan(ctx, input)
+				if err != nil {
+					errChan <- err
+					return
+				}
+
+				// Transform items into JSON strings
+				var jsonItems []list.Item
+				for _, item := range output.Items {
+					mapItem, err := tools.DynamoItemToMap(item)
+					if err != nil {
+						log.Printf("Error converting item: %v", err)
+						continue
+					}
+					jsonData, err := json.Marshal(mapItem)
+					if err != nil {
+						log.Printf("Error marshaling item to JSON: %v", err)
+						continue
+					}
+					jsonItems = append(jsonItems, tableDataRow(string(jsonData)))
+				}
+
+				// Append transformed items to the shared allItems slice
+				mu.Lock()
+				allItems = append(allItems, jsonItems...)
+				mu.Unlock()
+
+				// Check if more items are available
+				if output.LastEvaluatedKey == nil {
+					break
+				}
+
+				// Update startKey for the next scan in this segment
+				startKey = output.LastEvaluatedKey
+			}
+		}(segment)
+	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
+	close(errChan)
+
+	// Check if there were any errors
+	if err := <-errChan; err != nil {
+		log.Printf("Error in parallel scan: %v", err)
+		return FetchErrorMsg{err}
+	}
+
+	// Cache the fetched data
+	if err := tools.SaveCache(allItems, CacheDir, tableDataCacheFilePath(tableName)); err != nil {
+		log.Println("Failed to save cache:", err)
+	}
+
+	return DataFetchedMsg(allItems)
+}
+
+// refreshTableDataCacheInBackground fetches fresh data and updates the cache in the background
+func (m TableDataModel) refreshTableDataCacheInBackground(tableName string) {
+	// Perform a fetch and cache update in the background
+	msg := m.fetchAndCacheTableData(tableName)
+	if fetchMsg, ok := msg.(DataFetchedMsg); ok {
+		// Handle the result if needed (e.g., update the UI with fresh data)
+		log.Println("Cache refreshed in background for table data:", fetchMsg)
+	}
+}
+
+// Helper function to generate a unique cache file path for each table
+func tableDataCacheFilePath(tableName string) string {
+	return fmt.Sprintf("%s/%s_data_cache.json", CacheDir, tableName)
 }
 
 // extractPrimaryKeyAttributes retrieves primary key attributes and their types from the KeySchema
