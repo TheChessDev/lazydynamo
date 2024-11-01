@@ -29,7 +29,7 @@ cd "$EXECUTABLE_NAME" || exit 1
 
 # Build the executable
 echo "Building $EXECUTABLE_NAME..."
-if ! go build "$BUILD_PATH" -o "$EXECUTABLE_NAME"; then
+if ! go build -o "$EXECUTABLE_NAME" "$BUILD_PATH"; then
     echo "Error: Build failed."
     exit 1
 fi
