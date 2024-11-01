@@ -4,6 +4,7 @@
 REPO="TheChessDev/lazydynamo"
 INSTALL_DIR="/usr/local/bin"
 EXECUTABLE_NAME="lazydynamo"
+BUILD_PATH="cmd/main/main.go"
 
 # Ensure prerequisites are installed
 echo "Checking for prerequisites..."
@@ -28,7 +29,7 @@ cd "$EXECUTABLE_NAME" || exit 1
 
 # Build the executable
 echo "Building $EXECUTABLE_NAME..."
-if ! go build -o "$EXECUTABLE_NAME"; then
+if ! go build "$BUILD_PATH" -o "$EXECUTABLE_NAME"; then
     echo "Error: Build failed."
     exit 1
 fi
