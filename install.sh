@@ -2,9 +2,12 @@
 
 # Repository details
 REPO="TheChessDev/lazydynamo"
-INSTALL_DIR="/usr/local/bin"
 EXECUTABLE_NAME="lazydynamo"
 BUILD_PATH="cmd/main/main.go"
+
+# Define the installation directory
+INSTALL_DIR="$HOME/.lazydynamo/bin"
+mkdir -p "$INSTALL_DIR"
 
 # Ensure prerequisites are installed
 echo "Checking for prerequisites..."
@@ -42,9 +45,31 @@ sudo mv "$EXECUTABLE_NAME" "$INSTALL_DIR"
 cd ~ || exit 1
 rm -rf "$TEMP_DIR"
 
-# Confirm installation
-if command -v "$EXECUTABLE_NAME" &> /dev/null; then
-    echo "$EXECUTABLE_NAME successfully installed! Run it from anywhere with '$EXECUTABLE_NAME'."
+# Print success message
+echo "lazydynamo has been installed to $INSTALL_DIR."
+
+# Check if the installation directory is already in the PATH
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    SHELL_CONFIG=""
+    if [[ -n "$ZSH_VERSION" ]]; then
+        SHELL_CONFIG="$HOME/.zshrc"
+    elif [[ -n "$BASH_VERSION" ]]; then
+        SHELL_CONFIG="$HOME/.bashrc"
+    else
+        SHELL_CONFIG="$HOME/.profile"
+    fi
+
+    echo "To make lazydynamo globally accessible, add the following line to your $SHELL_CONFIG:"
+    echo "export PATH=\"\$PATH:$INSTALL_DIR\""
+
+    # Optionally, add to the shell config file automatically
+    read -p "Would you like to add this to your $SHELL_CONFIG now? (y/n) " choice
+    if [[ "$choice" =~ ^[Yy]$ ]]; then
+        echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$SHELL_CONFIG"
+        echo "Path updated. Please restart your terminal or run 'source $SHELL_CONFIG' to apply changes."
+    else
+        echo "You chose not to modify $SHELL_CONFIG. Please remember to add $INSTALL_DIR to your PATH manually."
+    fi
 else
-    echo "Installation failed. Please check permissions or the installation directory."
+    echo "$INSTALL_DIR is already in your PATH."
 fi
