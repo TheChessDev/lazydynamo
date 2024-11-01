@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/TheChessDev/lazydynamo/lazydynamo"
+	"github.com/TheChessDev/lazydynamo/tui"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
