@@ -19,9 +19,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type DataFetchedMsg []list.Item
@@ -124,6 +122,7 @@ func (m TableDataModel) New(client *dynamodb.Client) TableDataModel {
 
 	l := list.New(items, tableDataDelegate{}, 10, 10)
 
+	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.Styles.PaginationStyle = paginationStyle
 	l.SetShowHelp(true)
@@ -132,10 +131,6 @@ func (m TableDataModel) New(client *dynamodb.Client) TableDataModel {
 	l.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{tableDataKeys.SelectRow}
 	}
-	l.SetSpinner(spinner.Dot)
-	l.Styles.Spinner = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	l.Title = ""
-	l.Styles.Title = lipgloss.NewStyle()
 
 	return TableDataModel{
 		keys: tableDataKeys,
@@ -171,7 +166,7 @@ func (m TableDataModel) fetchAllData(tableName string) tea.Cmd {
 
 // fetchAndCacheTableData performs an immediate fetch from DynamoDB, caches the result, and returns it
 func (m TableDataModel) fetchAndCacheTableData(tableName string) tea.Msg {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	// Describe the table to get primary key schema
@@ -191,7 +186,7 @@ func (m TableDataModel) fetchAndCacheTableData(tableName string) tea.Msg {
 	}
 
 	// Get the number of available CPU cores
-	numSegments := runtime.NumCPU()
+	numSegments := runtime.NumCPU() / 2
 	log.Printf("Using %d segments for parallel scan", numSegments)
 
 	var allItems []list.Item // Store data as single-line JSON strings

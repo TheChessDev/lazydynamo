@@ -123,11 +123,12 @@ type MainModel struct {
 	client           *dynamodb.Client
 	dataScrollOffset int
 	ddBuffer         string
-	focus            sessionState
 	loading          bool
 	region           string
 	tables           []tableNameItem
 	collectionsList  list.Model
+
+	loadingIndicator spinner.Model
 
 	viewport viewport.Model
 }
@@ -137,6 +138,7 @@ var (
 	itemStyle         = lipgloss.NewStyle().PaddingLeft(4)
 	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("10"))
 	paginationStyle   = list.DefaultStyles().PaginationStyle.PaddingLeft(4)
+	spinnerStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 )
 
 type tableNameItem string
@@ -177,7 +179,7 @@ func New() MainModel {
 	// Load AWS config with custom retry settings
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"),
 		config.WithRetryer(func() aws.Retryer {
-			return retry.AddWithMaxAttempts(retry.NewStandard(), 5)
+			return retry.AddWithMaxAttempts(retry.NewStandard(), 20)
 		}),
 	)
 
@@ -191,6 +193,7 @@ func New() MainModel {
 
 	l := list.New(items, itemDelegate{}, 10, 10)
 
+	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.Styles.PaginationStyle = paginationStyle
 	l.SetShowHelp(true)
@@ -199,21 +202,22 @@ func New() MainModel {
 	l.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{keys.SelectCollection}
 	}
-	l.SetSpinner(spinner.Dot)
-	l.Styles.Spinner = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	l.Title = ""
-	l.Styles.Title = lipgloss.NewStyle()
+
+	s := spinner.New()
+	s.Style = spinnerStyle
+	s.Spinner = spinner.Line
 
 	return MainModel{
-		state:           ViewingCollections,
-		region:          "us-east-1",
-		client:          client,
-		loading:         true,
-		help:            help.New(),
-		keys:            keys,
-		tableDataModel:  TableDataModel{}.New(client),
-		viewRowModel:    ViewRowModel{}.New(),
-		collectionsList: l,
+		state:            ViewingCollections,
+		region:           "us-east-1",
+		client:           client,
+		loading:          false,
+		help:             help.New(),
+		keys:             keys,
+		tableDataModel:   TableDataModel{}.New(client),
+		viewRowModel:     ViewRowModel{}.New(),
+		collectionsList:  l,
+		loadingIndicator: s,
 	}
 }
 
@@ -267,13 +271,16 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case TablesFetchedMsg:
 		cmd := m.collectionsList.SetItems(msg)
-		cmds = append(cmds, cmd, m.collectionsList.ToggleSpinner())
+		m.loading = false
+		cmds = append(cmds, cmd)
 	case TablesFetchStartedMsg:
-		cmds = append(cmds, m.fetchCollections(), m.collectionsList.StartSpinner())
+		m.loading = true
+		cmds = append(cmds, m.fetchCollections(), m.loadingIndicator.Tick)
 	case DataFetchedMsg:
+		m.loading = false
 		m.tableDataModel.dataList.SetItems(msg)
 		m.state = ViewingData
-		cmds = append(cmds, cmd, m.tableDataModel.dataList.ToggleSpinner())
+		cmds = append(cmds, cmd)
 	}
 
 	if !m.EditMode() {
@@ -315,9 +322,10 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !(m.collectionsList.FilterState() == list.Filtering) {
 					i, ok := m.collectionsList.SelectedItem().(tableNameItem)
 					if ok {
+						m.loading = true
 						m.tableDataModel.selectedTable = string(i)
 					}
-					cmds = append(cmds, m.tableDataModel.dataList.StartSpinner(), m.tableDataModel.fetchAllData(m.tableDataModel.selectedTable))
+					cmds = append(cmds, m.tableDataModel.fetchAllData(m.tableDataModel.selectedTable), m.loadingIndicator.Tick)
 				}
 			}
 		}
@@ -384,6 +392,9 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
+	m.loadingIndicator, cmd = m.loadingIndicator.Update(msg)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -436,7 +447,13 @@ func (m MainModel) View() string {
 		tableDataPane.Render("Data", dataContent, width-leftWidth-4, height-6),
 	)
 
-	s += lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true).Render("\n" + m.GetCurrentState() + "\n")
+	loadingFeedback := m.loadingIndicator.View()
+
+	if !m.loading {
+		loadingFeedback = ""
+	}
+
+	s += lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true).Render("\n" + m.GetCurrentState() + " " + loadingFeedback + "\n")
 
 	if m.state != ViewingCollections {
 		s += "\n" + helpView
