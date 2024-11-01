@@ -216,7 +216,7 @@ func New() MainModel {
 }
 
 func (m MainModel) Init() tea.Cmd {
-	return m.startTableFetch()
+	return m.startCollectionsFetch()
 }
 
 func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -257,7 +257,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.collectionsList.SetItems(msg)
 		cmds = append(cmds, cmd, m.collectionsList.ToggleSpinner())
 	case TablesFetchStartedMsg:
-		cmds = append(cmds, m.fetchTables(), m.collectionsList.StartSpinner())
+		cmds = append(cmds, m.fetchCollections(), m.collectionsList.StartSpinner())
 	}
 
 	if !m.EditMode() {
@@ -379,15 +379,14 @@ func (m *MainModel) EditMode() bool {
 
 type TablesFetchStartedMsg string
 
-// Command to fetch tables from DynamoDB
-func (m MainModel) startTableFetch() tea.Cmd {
+func (m MainModel) startCollectionsFetch() tea.Cmd {
 	return func() tea.Msg {
 		return TablesFetchStartedMsg("started")
 	}
 }
 
 // Command to fetch tables from DynamoDB
-func (m MainModel) fetchTables() tea.Cmd {
+func (m MainModel) fetchCollections() tea.Cmd {
 	return func() tea.Msg {
 		var tableNames []list.Item
 		input := &dynamodb.ListTablesInput{}
