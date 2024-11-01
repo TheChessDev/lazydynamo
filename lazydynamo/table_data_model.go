@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,13 +32,43 @@ func (i tableDataRow) FilterValue() string { return string(i) }
 
 type tableDataDelegate struct{}
 
+func (d tableDataDelegate) Height() int                             { return 1 }
+func (d tableDataDelegate) Spacing() int                            { return 0 }
+func (d tableDataDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+func (d tableDataDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	i, ok := listItem.(tableDataRow)
+	if !ok {
+		return
+	}
+
+	str := fmt.Sprintf("%s", i)
+
+	modelWidth := m.Width()
+	maxWidth := modelWidth - 3 // Adjust for padding or any prefix/suffix
+
+	// Trim the JSON string if it exceeds the model width
+	if len(str) > maxWidth {
+		str = str[:maxWidth-3] + "..." // Truncate and add ellipsis
+	}
+
+	fn := itemStyle.Render
+	if index == m.Index() {
+		fn = func(s ...string) string {
+			return selectedItemStyle.Render("> " + strings.Join(s, " "))
+		}
+	}
+
+	fmt.Fprint(w, fn(str))
+}
+
 // keyMap defines a set of keybindings. To work for help it must satisfy
 // key.Map. It could also very easily be a map[string]key.Binding.
 type TableDataKeyMap struct {
-	Up   key.Binding
-	Down key.Binding
-	Help key.Binding
-	Quit key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Help      key.Binding
+	Quit      key.Binding
+	SelectRow key.Binding
 }
 
 // ShortHelp returns keybindings to be shown in the mini help view. It's part
@@ -63,6 +95,10 @@ var tableDataKeys = TableDataKeyMap{
 		key.WithKeys("down", "j"),
 		key.WithHelp("↓/j", "move down"),
 	),
+	SelectRow: key.NewBinding(
+		key.WithKeys(tea.KeySpace.String()),
+		key.WithHelp("space", "select row"),
+	),
 	Help: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "toggle help"),
@@ -84,7 +120,7 @@ type TableDataModel struct {
 func (m TableDataModel) New(client *dynamodb.Client) TableDataModel {
 	items := []list.Item{}
 
-	l := list.New(items, itemDelegate{}, 10, 10)
+	l := list.New(items, tableDataDelegate{}, 10, 10)
 
 	l.SetShowStatusBar(false)
 	l.Styles.PaginationStyle = paginationStyle
@@ -92,7 +128,7 @@ func (m TableDataModel) New(client *dynamodb.Client) TableDataModel {
 	l.SetShowFilter(true)
 	l.KeyMap.Quit.SetKeys("q", "ctrl-c")
 	l.AdditionalFullHelpKeys = func() []key.Binding {
-		return []key.Binding{keys.SelectCollection}
+		return []key.Binding{tableDataKeys.SelectRow}
 	}
 	l.SetSpinner(spinner.Dot)
 	l.Styles.Spinner = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))

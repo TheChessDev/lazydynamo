@@ -227,21 +227,26 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Adjust the height ratio based on the aspect ratio
 		adjustedHeightRatio := baseHeightRatio * aspectRatio
+		dataListHeightRation := baseHeightRatio * aspectRatio
 
 		// Clamp the adjustedHeightRatio to a reasonable range, so it doesn't go too low or high
 		if adjustedHeightRatio > 2.2 {
 			adjustedHeightRatio = 0.7 // Set a maximum height ratio
+			dataListHeightRation = 0.8
 		} else if adjustedHeightRatio < 2.2 && adjustedHeightRatio > 0.96 {
 			adjustedHeightRatio = 0.3
+			dataListHeightRation = 0.4
 		} else if adjustedHeightRatio < 0.96 {
 			adjustedHeightRatio = 0.2
+			dataListHeightRation = 0.3
 		}
 
 		// Calculate the final list height based on the adjusted height ratio
 		collectionListHeight := int(adjustedHeightRatio * float64(msg.Height))
+		dataListHeight := int(dataListHeightRation * float64(msg.Height))
 
 		m.collectionsList.SetHeight(collectionListHeight)
-		m.tableDataModel.dataList.SetHeight(collectionListHeight)
+		m.tableDataModel.dataList.SetHeight(dataListHeight)
 	case TablesFetchedMsg:
 		cmd := m.collectionsList.SetItems(msg)
 		cmds = append(cmds, cmd, m.collectionsList.ToggleSpinner())
@@ -334,7 +339,7 @@ func (m MainModel) View() string {
 
 	m.collectionsList.SetWidth(leftWidth - 5)
 
-	m.tableDataModel.dataList.SetWidth(width - leftWidth - 4)
+	m.tableDataModel.dataList.SetWidth(width - leftWidth - 10)
 
 	var s string
 
@@ -354,8 +359,6 @@ func (m MainModel) View() string {
 		tableListPane = components.NewDefaultBoxWithLabel(BoxActiveColor, lipgloss.Left, lipgloss.Left)
 	}
 
-	dataContent := m.tableDataModel.dataList.View()
-
 	s += lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		lipgloss.JoinVertical(
@@ -363,7 +366,7 @@ func (m MainModel) View() string {
 			awsRegionPane.Render("AWS Region", m.region, leftWidth, 3),
 			tableListPane.Render("Collections", m.collectionsList.View(), leftWidth, height-11),
 		),
-		tableDataPane.Render("Data", dataContent, width-leftWidth-4, height-6),
+		tableDataPane.Render("Data", m.tableDataModel.dataList.View(), width-leftWidth-4, height-6),
 	)
 
 	if m.state != ViewingCollections {
@@ -374,7 +377,7 @@ func (m MainModel) View() string {
 }
 
 func (m *MainModel) EditMode() bool {
-	return m.state == ViewingCollections
+	return m.state == ViewingCollections || m.state == ViewingData
 }
 
 type TablesFetchStartedMsg string
