@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Repository details
-REPO="your-github-username/lazydynamo"
+REPO="TheChessDev/lazydynamo"
 INSTALL_DIR="/usr/local/bin"
 EXECUTABLE_NAME="lazydynamo"
 
